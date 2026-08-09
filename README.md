@@ -81,8 +81,8 @@ Plus `GET /v1/health` for the connection test.
 3. Enable **Developer mode**
 4. **Load unpacked** → select this folder
 5. Pin **Hermes Minimal**, click the icon (or `Alt+H`)
-6. **Optional but required for `IMAGE:` / `MEDIA:` / `@image:` lines:** in `chrome://extensions` → **Details** → enable **"Allow access to file URLs"**. Without it, local `file://` media is blocked and renders as clickable path links instead. **Reload the extension after toggling** so already-rendered messages re-render. (Plain `http(s)` image URLs and pasted images work either way.)
-7. **Alternative to step 6 — media bridge (zero browser config):** double-click `media-bridge.bat` (keeps running in a console window; Python 3 required) and local files serve via `http://127.0.0.1:8643` automatically. The panel tries `file://` first, then the bridge, before showing the hint block. See "Media bridge" below.
+6. **Local media**: Edge cannot load `file://` subresources from extension pages — even with "Allow access to file URLs" on (Chrome tolerates it, Edge does not). The reliable path is the **media bridge** in step 7; the toggle is no longer required for images.
+7. **Media bridge (recommended, zero browser config):** double-click `media-bridge.bat` (keep the console window open; Python 3 required) — the panel probes `http://127.0.0.1:8643` at boot and serves local media through it directly. See "Media bridge" below.
 8. Get your API key — on Windows, double-click `Copy_API_Key.cmd` → paste into Settings → **Test connection** → **Save**
 
 ## Layout (no build)
@@ -135,7 +135,7 @@ Request body used by v1:
 
 - Markdown via vendored [marked](https://github.com/markedjs/marked), sanitized with [DOMPurify](https://github.com/cure53/DOMPurify) before anything enters the DOM. GFM tables, task lists, fences, blockquotes, links, images, etc.
 - LaTeX math: `$…$` / `\(…\)` inline, `$$…$$` / `\[…\]` display — typeset with vendored [KaTeX](https://katex.org). Escaped `\$` and money-like `$5` stay literal; math inside fenced/indented code blocks is never touched.
-- **Local images**: content lines like `IMAGE:C:\Users\...\image.png`, `MEDIA:…` and the desktop app's `@image:…` / `@media:…` attachment lines become media in the chat — images (`png/jpg/gif/webp/bmp/avif/svg`) as inline `<img>`, audio (`mp3/ogg/wav/m4a/aac/flac/opus`) and video (`mp4/webm/mov/mkv`) as inline players. Windows/POSIX absolute paths are converted to `file://` URLs; if the file can't load, the panel tries the **media bridge**, then degrades to a clickable path link with an actionable hint.
+- **Local images**: content lines like `IMAGE:C:\Users\...\image.png`, `MEDIA:…` and the desktop app's `@image:…` / `@media:…` attachment lines become media in the chat — images (`png/jpg/gif/webp/bmp/avif/svg`) as inline `<img>`, audio (`mp3/ogg/wav/m4a/aac/flac/opus`) and video (`mp4/webm/mov/mkv`) as inline players. Windows/POSIX absolute paths are loaded **bridge-first** (`http://127.0.0.1:8643` when the bridge is up), falling back to `file://`, then to a clickable path link with an actionable hint. `data:` (pasted) and `http(s)` URLs bypass the bridge entirely.
 - **Pasted images**: paste (or drag-drop) an image into the composer → thumbnail chips → click to preview (`Esc`/backdrop closes). On send each image is downscaled (longest side ≤1280 px, ≤~350 KB) and appended as an `@image:data:image/...` line — rendered as an inline image with **no file-URL toggle needed**. Known limitation: an agent's auxiliary vision may reject large data URLs (400) — the agent then works around it by saving the image to disk; desktop-app path attachments remain the reliable vision path.
 - **`@url:` link attachments** (desktop "Attached Context", e.g. `@url:`https://example.com/``, backticks optional) become clickable links, inline or standalone.
 - Streaming deltas re-render only the last message, throttled to ~60 ms, and autoscroll while the reply grows.
@@ -146,11 +146,11 @@ Request body used by v1:
 
 ## Media bridge
 
-`media-bridge.py` (stdlib-only) serves local media to the panel at `http://127.0.0.1:8643/media?path=<abs>` so images/audio/video show without the browser's file-URL toggle:
+`media-bridge.py` (stdlib-only) is the **primary** way local media reaches the panel — Edge can't load `file://` subresources from extension pages (verified on Edge 151, even with the file-URL toggle on). It serves files at `http://127.0.0.1:8643/media?path=<abs>`:
 
-- Run it: double-click `media-bridge.bat` (or `python media-bridge.py`) — keep the window open.
+- Run it: double-click `media-bridge.bat` (or `python media-bridge.py`) — keep the window open. Auto-start via the Windows **Startup** folder is recommended (`shell:startup` → shortcut to `media-bridge.bat`); the panel probes the bridge at boot and uses it directly when it's up.
 - Serves only files under `%APPDATA%\Hermes`, your home directory, and `/tmp`; everything else gets a `403`.
-- The panel's fallback chain per item: `file://` → bridge → hint block ("start media-bridge.bat, or enable Allow access to file URLs…"). Nothing breaks if the bridge isn't running.
+- Fallback chain per item: **bridge** → `file://` → hint block ("start media-bridge.bat…"). Nothing breaks if the bridge isn't running — `file://` then kicks in (works in Chrome; in Edge you'll see the hint block instead).
 
 ## Browser use — later
 
@@ -176,7 +176,7 @@ The settings checkbox is a placeholder. Plan:
 | Connection refused | `hermes gateway start` (or restart the scheduled task) |
 | Health OK but sessions 401 | Key mismatch between `.env` and running process — restart gateway after changing key |
 | Empty replies | Check Hermes logs; model backend may be down |
-| Local images render as path links | Run `media-bridge.bat`, or enable **"Allow access to file URLs"** in `chrome://extensions` → Details, then **reload the extension** |
+| Local images render as path links | Run `media-bridge.bat` (or `python media-bridge.py`) and reload the panel — Edge can't load `file://` from extension pages |
 
 Probe from a terminal (replace `KEY`):
 

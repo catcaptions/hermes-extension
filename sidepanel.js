@@ -29,9 +29,10 @@ const STREAM_RENDER_MS = 60;
 const MAX_IMAGE_SIDE = 1280;
 const MAX_DATA_URL_BYTES = 350 * 1024;
 
-// Local media bridge (media-bridge.py) — zero-config fallback for file://.
+// Local media bridge (media-bridge.py) — the reliable path for local files
+// (Edge can't load file:// subresources from extension pages).
 const BRIDGE_BASE = 'http://127.0.0.1:8643';
-const BRIDGE_HINT = 'local file — start media-bridge.bat, or enable "Allow access to file URLs" in edge://extensions → Details, then reload the extension (see README)';
+const BRIDGE_HINT = 'local file — start media-bridge.bat, then reload the panel (see README)';
 
 // Hardcoded build stamp so the user can confirm the loaded build at a glance.
 const BUILD_STRING = 'build 2026-08-09 24a1d11';
@@ -86,6 +87,7 @@ let lastFingerprint = null;  // fingerprint of the last rendered message list
 let quietUntil = 0;          // poll adoption grace after a local stream ends
 let streamEndedAt = 0;       // used for the stale-limit guard
 let sessionMissing = false;  // active session 404'd server-side
+let bridgeUp = false;        // local media bridge reachable at boot (probe)
 
 // Attachments (pasted/dropped images) awaiting send: { id, name, dataUrl }.
 const attachments = [];
@@ -499,12 +501,34 @@ function bridgeUrl(raw) {
   return `${BRIDGE_BASE}/media?path=${encodeURIComponent(p)}`;
 }
 
+// Boot-time bridge probe: any HTTP response (200/403/404) means UP; a
+// network error means DOWN. Non-blocking, ~1.5s cap. When DOWN, media uses
+// file:// and the existing error chain probes the bridge again per item.
+async function probeBridge() {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 1500);
+  try {
+    await fetch(`${BRIDGE_BASE}/media?path=probe`, { signal: ac.signal });
+    bridgeUp = true;
+  } catch {
+    bridgeUp = false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Route media by extension (renderer.mediaKind): img → <img>, audio/video →
 // <audio>/<video controls>, anything else → fallback block. srcOverride
 // lets a bridge-served element re-render with the bridge URL (no error
 // churn on every streamed delta).
 function mediaElementHtml(raw, idx, srcOverride) {
-  const url = srcOverride || renderer.mediaUrl(raw);
+  // Bridge-first: Edge cannot load file:// subresources from extension
+  // pages (even with "Allow access to file URLs" on); the bridge is the
+  // reliable path for local absolute paths. data:/http(s) pass through
+  // untouched (bridgeUrl returns null for them). When the bridge is down,
+  // fall back to file:// and let the error chain probe it again.
+  const bridge = bridgeUrl(raw);
+  const url = srcOverride || (bridgeUp && bridge ? bridge : renderer.mediaUrl(raw));
   const kind = renderer.mediaKind(raw);
   if (kind === 'img') {
     return `<img class="hm-img" data-hm-idx="${idx}" src="${escapeHtml(url || raw)}" alt="${escapeHtml(basename(raw))}">`;
@@ -1095,6 +1119,7 @@ async function boot() {
   autoResizePrompt();
   renderMessages();
   startPolling();
+  probeBridge(); // async, non-blocking — bridge-first media depends on it
 
   if (!settings.apiKey) {
     setConnection('offline', 'Add API key in settings');
