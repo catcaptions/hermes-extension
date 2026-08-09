@@ -19,7 +19,7 @@ No build step · No frameworks · No content scripts
 
 A tiny Chrome/Edge extension that puts a ChatGPT-clean chat panel in your browser's side panel and talks to a **local Hermes Agent gateway** over plain HTTP + SSE.
 
-The whole extension is **vanilla HTML/CSS/JS with no build step** — the entire client is one ~450-line file. It was intentionally kept minimal so it's easy to read, audit, and maintain (even for weaker coding models 😉).
+The whole extension is **vanilla HTML/CSS/JS with no build step** — the client is `sidepanel.js` plus a small, node-testable `renderer.js`. It was intentionally kept minimal so it's easy to read, audit, and maintain (even for weaker coding models 😉).
 
 ## Features
 
@@ -29,6 +29,10 @@ The whole extension is **vanilla HTML/CSS/JS with no build step** — the entire
 | Paste gateway URL + API key | ✅ |
 | Create session on first message | ✅ |
 | Stream replies via SSE | ✅ |
+| Markdown rendering (marked + DOMPurify) | ✅ |
+| LaTeX math (KaTeX: `$…$`, `$$…$$`, `\(…\)`, `\[…\]`) | ✅ |
+| Local images (`IMAGE:` / `image:` / `MEDIA:` lines) | ✅ |
+| Live updates from other clients (~3 s polling) | ✅ |
 | Session list + switch | ✅ |
 | Load message history | ✅ |
 | New chat | ✅ |
@@ -72,7 +76,8 @@ Plus `GET /v1/health` for the connection test.
 3. Enable **Developer mode**
 4. **Load unpacked** → select this folder
 5. Pin **Hermes Minimal**, click the icon (or `Alt+H`)
-6. Get your API key — on Windows, double-click `Copy_API_Key.cmd` → paste into Settings → **Test connection** → **Save**
+6. **Optional but required for `IMAGE:` lines:** in `chrome://extensions` → **Details** → enable **"Allow access to file URLs"**. Without it, local `file://` images are blocked and render as clickable path links instead. (Plain `http(s)` image URLs in markdown work either way.)
+7. Get your API key — on Windows, double-click `Copy_API_Key.cmd` → paste into Settings → **Test connection** → **Save**
 
 ## Layout (no build)
 
@@ -80,8 +85,11 @@ Plus `GET /v1/health` for the connection test.
 manifest.json       MV3 — sidePanel + storage only
 background.js       open panel on toolbar click
 sidepanel.html      shell
-sidepanel.css       light ChatGPT-like theme
-sidepanel.js        client + SSE parser (~450 lines)
+sidepanel.css       light ChatGPT-like theme + markdown styles
+sidepanel.js        client: SSE parser, rendering pipeline, polling
+renderer.js         pure markdown/media/math extraction (node-testable)
+test_renderer.js    unit tests — run: node test_renderer.js
+vendor/             pinned: marked 12.0.2, DOMPurify 3.1.6, KaTeX 0.16.11 (+ fonts)
 icons/              16/32/48/128
 Copy_API_Key.cmd    copies API_SERVER_KEY to clipboard
 README.md
@@ -113,6 +121,21 @@ Request body used by v1:
 
 (The bulky extension also sends `model`, `provider`, `require_model_lock`, `selected_skills`. v1 lets the gateway use its default model.)
 
+## Rendering & live updates
+
+**Rendering** (applied to every message, user or assistant):
+
+- Markdown via vendored [marked](https://github.com/markedjs/marked), sanitized with [DOMPurify](https://github.com/cure53/DOMPurify) before anything enters the DOM. GFM tables, task lists, fences, blockquotes, links, images, etc.
+- LaTeX math: `$…$` / `\(…\)` inline, `$$…$$` / `\[…\]` display — typeset with vendored [KaTeX](https://katex.org). Escaped `\$` and money-like `$5` stay literal; math inside fenced/indented code blocks is never touched.
+- **Local images**: content lines like `IMAGE:C:\Users\...\image.png` (also `image:` / `MEDIA:`) become images in the chat. Windows/POSIX absolute paths are converted to `file://` URLs — requires the **"Allow access to file URLs"** toggle (see Install). If the toggle is off or the file is missing, the image degrades to a clickable path link.
+- Streaming deltas re-render only the last message, throttled to ~60 ms, and autoscroll while the reply grows.
+
+**Live updates** — the gateway has no push endpoint for sessions other clients wrote to, so the panel polls while it is visible and idle:
+
+- Every **3 s**, a cheap session-list request compares the active session's `message_count`; only when it changes is the full history fetched and reconciled by content fingerprint.
+- Polling pauses while the panel is hidden, while settings are open, or while a stream is in progress, and never drops local messages (a 6 s post-stream grace plus a 30 s stale-limit guard a just-streamed message from blinking out).
+- Chat in the desktop app and the message appears in the panel within ~3 s, no reload needed.
+
 ## Browser use — later
 
 The settings checkbox is a placeholder. Plan:
@@ -129,6 +152,7 @@ The settings checkbox is a placeholder. Plan:
 | Connection refused | `hermes gateway start` (or restart the scheduled task) |
 | Health OK but sessions 401 | Key mismatch between `.env` and running process — restart gateway after changing key |
 | Empty replies | Check Hermes logs; model backend may be down |
+| Local images render as path links | Enable **"Allow access to file URLs"** in `chrome://extensions` → Details, then reopen the panel |
 
 Probe from a terminal (replace `KEY`):
 

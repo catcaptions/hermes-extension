@@ -6,7 +6,7 @@
 'use strict';
 
 const assert = require('node:assert');
-const { extractTokens, mediaUrl, fingerprint } = require('./renderer.js');
+const { extractTokens, mediaUrl, fingerprint, fixAttributeSentinels } = require('./renderer.js');
 
 let passed = 0;
 const failures = [];
@@ -197,6 +197,32 @@ t('math: unclosed $$ stays literal', () => {
   assert.strictEqual(math.length, 0);
 });
 
+t('math: display does not swallow inline math on the same line (BUG-2)', () => {
+  const { math, scrubbed } = extractTokens('text $$a$$ and $b$ here');
+  assert.strictEqual(math.length, 2);
+  assert.strictEqual(math[0].tex, 'a');
+  assert.ok(math[0].display);
+  assert.strictEqual(math[1].tex, 'b');
+  assert.ok(!math[1].display);
+  assert.ok(!scrubbed.includes('$b$'));
+});
+
+t('math: inline before display on the same line (BUG-2)', () => {
+  const { math } = extractTokens('$x$ and $$y$$');
+  assert.strictEqual(math.length, 2);
+  assert.ok(math[0].display); // block pass runs first
+  assert.strictEqual(math[0].tex, 'y');
+  assert.strictEqual(math[1].tex, 'x');
+  assert.ok(!math[1].display);
+});
+
+t('math: back-to-back $$ and $ on one line (BUG-2)', () => {
+  const { math } = extractTokens('$$a$$$b$');
+  assert.strictEqual(math.length, 2);
+  assert.strictEqual(math[0].tex, 'a');
+  assert.strictEqual(math[1].tex, 'b');
+});
+
 t('math: not inside fenced code', () => {
   const { math, scrubbed } = extractTokens('```\n$x$\n$$y$$\n```');
   assert.strictEqual(math.length, 0);
@@ -259,6 +285,31 @@ t('mediaUrl: garbage is null', () => {
   assert.strictEqual(mediaUrl('foobar'), null);
   assert.strictEqual(mediaUrl(''), null);
   assert.strictEqual(mediaUrl('  '), null);
+});
+
+// ── attribute sentinel exemption (BUG-3) ─────────────────────────
+
+t('attr: math in link destination becomes percent-encoded TeX, not HTML', () => {
+  const math = [{ tex: 'x^2', display: false }];
+  const out = fixAttributeSentinels('<p><a href="⟦HMTH:abc:0⟧">go</a></p>', 'abc', math);
+  assert.strictEqual(out, '<p><a href="x%5E2">go</a></p>');
+});
+
+t('attr: alt and title attributes are exempted too', () => {
+  const math = [{ tex: 'a_b', display: false }];
+  const out = fixAttributeSentinels('<img src="u.png" alt="⟦HMTH:abc:0⟧" title="⟦HMTH:abc:0⟧">', 'abc', math);
+  assert.strictEqual(out, '<img src="u.png" alt="a_b" title="a_b">');
+});
+
+t('attr: text-node sentinels are left for the generic replacement', () => {
+  const math = [{ tex: 'x', display: false }];
+  const out = fixAttributeSentinels('<p>⟦HMTH:abc:0⟧</p>', 'abc', math);
+  assert.strictEqual(out, '<p>⟦HMTH:abc:0⟧</p>');
+});
+
+t('attr: no sentinels is a no-op; media sentinels untouched', () => {
+  const out = fixAttributeSentinels('<p>⟦HIMG:abc:0⟧</p>', 'abc', []);
+  assert.strictEqual(out, '<p>⟦HIMG:abc:0⟧</p>');
 });
 
 // ── fingerprint ─────────────────────────────────────────────────

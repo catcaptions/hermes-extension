@@ -138,8 +138,10 @@ function extractTokens(text) {
       math.push({ tex, display: true });
       return `⟦HMTH:${n}:${math.length - 1}⟧`;
     });
+    // Inline scan always runs on the residual (block math is already gone),
+    // so `$$a$$ and $b$` extracts both instead of swallowing the inline one.
     for (const line of scrubbed.split('\n')) {
-      out.push(line.includes('⟦') ? line : replaceInline(line, n, math));
+      out.push(replaceInline(line, n, math));
     }
     run = [];
   };
@@ -192,6 +194,21 @@ function extractTokens(text) {
 }
 
 /**
+ * Replace math sentinels that ended up inside HTML attributes (link
+ * destinations, image alt/title) with percent-encoded raw TeX instead of
+ * KaTeX HTML. Without this, `[x]($y$)` becomes attribute soup: the KaTeX
+ * markup lands inside href="…" (BUG-3). Must run BEFORE the generic
+ * sentinel replacement.
+ */
+function fixAttributeSentinels(html, n, math) {
+  const re = new RegExp(`⟦HMTH:${n}:(\\d+)⟧`, 'g');
+  return html.replace(/(href|src|alt|title)="([^"]*)"/g, (m, attr, val) => {
+    if (!val.includes('⟦HMTH')) return m;
+    return `${attr}="${val.replace(re, (mm, i) => encodeURIComponent(math[Number(i)]?.tex ?? ''))}"`;
+  });
+}
+
+/**
  * Local media path → usable URL. Windows drive or POSIX absolute paths
  * become file:// URLs; http(s)/file URLs pass through; anything else → null
  * (caller renders the raw path as a fallback link instead of an <img>).
@@ -220,7 +237,7 @@ function fingerprint(msgs) {
   return JSON.stringify((msgs || []).map((m) => `${m && m.role}\u0000${m && m.content != null ? String(m.content) : ''}`));
 }
 
-const api = { extractTokens, scanInlineMath, mediaUrl, fingerprint };
+const api = { extractTokens, scanInlineMath, mediaUrl, fingerprint, fixAttributeSentinels };
 
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else globalThis.renderer = api;

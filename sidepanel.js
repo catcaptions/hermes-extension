@@ -379,6 +379,10 @@ function renderMarkdown(text, failed, tokens) {
   // constructed by us below and never pass through DOMPurify (CRITIQUE: the
   // default allowlist would strip file: URIs anyway).
   html = DOMPurify.sanitize(html);
+  // Math sentinels inside attributes (link destinations, img alt/title)
+  // become percent-encoded TeX, not KaTeX HTML (BUG-3). Run before the
+  // generic replacement below.
+  html = renderer.fixAttributeSentinels(html, nonce, math);
   html = html.replace(new RegExp(`⟦HMTH:${nonce}:(\\d+)⟧`, 'g'), (m, i) => mathHtml(math[Number(i)]));
   html = html.replace(new RegExp(`⟦HIMG:${nonce}:(\\d+)⟧`, 'g'), (m, i) => {
     const raw = media[Number(i)];
@@ -429,7 +433,10 @@ function renderMessageBody(msg) {
 
 function scheduleStreamingRender(msg) {
   clearTimeout(streamTimer);
-  streamTimer = setTimeout(() => renderMessageBody(msg), STREAM_RENDER_MS);
+  streamTimer = setTimeout(() => {
+    renderMessageBody(msg);
+    scrollToBottomIfNear(); // keep the caret in view while the reply grows
+  }, STREAM_RENDER_MS);
 }
 
 function scrollToBottomIfNear(threshold = 60) {
