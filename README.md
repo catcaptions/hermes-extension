@@ -152,6 +152,14 @@ Request body used by v1:
 - Serves only files under `%APPDATA%\Hermes`, your home directory, and `/tmp`; everything else gets a `403`.
 - Fallback chain per item: **bridge** → `file://` → hint block ("start media-bridge.bat…"). Nothing breaks if the bridge isn't running — `file://` then kicks in (works in Chrome; in Edge you'll see the hint block instead).
 
+**Verification note:** `media-bridge.py` sets `sys.dont_write_bytecode = True` and `media-bridge.bat` runs `python -B`, so no `__pycache__/` ever appears — Chrome/Edge refuse to load an unpacked extension whose root contains a `_`-prefixed name (e.g. `__pycache__`). Always syntax-check it WITHOUT `py_compile`:
+
+```bat
+python -B -c "import ast; ast.parse(open('media-bridge.py', encoding='utf-8').read()); print('OK')"
+```
+
+If you ever do run `python -m py_compile`, you MUST `rm -rf __pycache__` afterward and confirm it's gone (`ls -a | findstr /B _` must be empty).
+
 ## Browser use — later
 
 **Live updates** — the gateway has no push endpoint for sessions other clients wrote to, so the panel polls while it is visible and idle:

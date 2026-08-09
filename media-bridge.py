@@ -20,6 +20,10 @@ import sys
 import tempfile
 import urllib.parse
 
+# Never write __pycache__/.pyc — Chrome/Edge refuse to load an unpacked
+# extension whose root contains a name starting with "_" (e.g. __pycache__).
+sys.dont_write_bytecode = True
+
 HOST, PORT = '127.0.0.1', 8643
 
 SAVE_DIR = os.path.join(tempfile.gettempdir(), 'hm-media')
