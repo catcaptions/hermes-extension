@@ -40,7 +40,7 @@ const BRIDGE_BASE = 'http://127.0.0.1:8643';
 const BRIDGE_HINT = 'local file — start media-bridge.bat, then reload the panel (see README)';
 
 // Hardcoded build stamp so the user can confirm the loaded build at a glance.
-const BUILD_STRING = 'build 2026-08-09 c4a15c0';
+const BUILD_STRING = 'build 2026-08-09 127bd61';
 
 // ── DOM ──────────────────────────────────────────────────────────
 
