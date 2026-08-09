@@ -34,7 +34,7 @@ const BRIDGE_BASE = 'http://127.0.0.1:8643';
 const BRIDGE_HINT = 'local file — start media-bridge.bat, or enable "Allow access to file URLs" in edge://extensions → Details, then reload the extension (see README)';
 
 // Hardcoded build stamp so the user can confirm the loaded build at a glance.
-const BUILD_STRING = 'build 2026-08-09 aa69cd6';
+const BUILD_STRING = 'build 2026-08-09 24a1d11';
 
 // ── DOM ──────────────────────────────────────────────────────────
 
