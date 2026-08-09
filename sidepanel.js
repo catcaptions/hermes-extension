@@ -85,6 +85,7 @@ let messages = []; // { role, content }
 let sending = false;
 let abortController = null;
 let streamTimer = null;
+let streamingSessionId = ''; // session streaming right now (pulse-dot marker)
 let pollTimer = null;
 let pollInFlight = false;
 let lastSeenCount = null;    // message_count from the last session-list poll
@@ -335,6 +336,7 @@ function showBanner(text, kind = 'error') {
 
 function setSending(on) {
   sending = on;
+  if (!on) updateRunningIndicator();
   els.btnSend.classList.toggle('busy', on);
   // While streaming: button becomes Stop (still enabled). Otherwise: Send.
   if (on) {
@@ -792,9 +794,23 @@ function renderSessionList(sessions) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = `session-item${id === activeSessionId ? ' active' : ''}`;
-    btn.innerHTML = `<span>${escapeHtml(sessionLabel(s))}</span><span class="meta">${escapeHtml(id)}</span>`;
+    btn.dataset.sid = id;
+    btn.innerHTML =
+      `<span class="srow"><i class="run-dot" aria-hidden="true"></i><span class="title">${escapeHtml(sessionLabel(s))}</span></span>` +
+      `<span class="meta">${escapeHtml(id)}</span>`;
     btn.addEventListener('click', () => selectSession(id, sessionLabel(s)));
     els.sessionList.appendChild(btn);
+  }
+  updateRunningIndicator();
+}
+
+// Running-stream marker (TASK_BRIEF_5): pulsing dot on the streaming
+// session in the dropdown + header. Called on stream start/end/switch.
+function updateRunningIndicator() {
+  const running = Boolean(streamingSessionId && streamingSessionId === activeSessionId);
+  els.sessionTitle.classList.toggle('running', running);
+  for (const btn of els.sessionList.querySelectorAll('.session-item')) {
+    btn.classList.toggle('running', btn.dataset.sid === streamingSessionId);
   }
 }
 
@@ -888,7 +904,12 @@ async function refreshConnectionBadge() {
 }
 
 async function beginNewChat() {
-  if (sending) return;
+  // Abort any in-flight stream so starting fresh never blocks (TASK_BRIEF_5).
+  if (sending) {
+    abortController?.abort();
+    clearTimeout(streamTimer);
+    setSending(false);
+  }
   closeSessionMenu();
   // Reset local state first so the UI never blocks on the server.
   activeSessionId = '';
@@ -921,7 +942,13 @@ async function beginNewChat() {
 }
 
 async function selectSession(id, title) {
-  if (sending) return;
+  // Abort any in-flight stream so switching never blocks (TASK_BRIEF_5).
+  // The gateway run continues server-side and shows up via the poll.
+  if (sending) {
+    abortController?.abort();
+    clearTimeout(streamTimer);
+    setSending(false);
+  }
   closeSessionMenu();
   activeSessionId = id;
   const label = title || id;
@@ -1022,6 +1049,8 @@ async function sendMessage(text) {
   renderMessages();
   setSending(true);
   abortController = new AbortController();
+  streamingSessionId = activeSessionId;
+  updateRunningIndicator();
 
   try {
     // v1 body: plain message (+ @image: data URLs as lines). browser_use
@@ -1079,6 +1108,7 @@ async function sendMessage(text) {
     renderMessages();
   } finally {
     abortController = null;
+    streamingSessionId = '';
     setSending(false);
     autoResizePrompt();
     els.prompt.focus();

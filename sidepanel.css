@@ -84,6 +84,13 @@ code {
   white-space: nowrap;
 }
 
+/* Running-stream marker (TASK_BRIEF_5): pulsing dot in the header. */
+#session-title.running::before {
+  content: '●';
+  color: var(--ok);
+  margin-right: 6px;
+}
+
 .header-actions { display: flex; gap: 2px; }
 
 .icon-btn, .ghost-btn {
@@ -146,6 +153,34 @@ code {
 }
 .session-item:hover { background: var(--bg-hover); }
 .session-item.active { background: var(--bg-soft); font-weight: 500; }
+.session-item .srow {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.session-item .srow .title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Running-stream marker (TASK_BRIEF_5): pulsing dot on the streaming session. */
+.session-item .run-dot {
+  display: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok);
+  margin-right: 8px;
+  flex: none;
+}
+.session-item.running .run-dot {
+  display: inline-block;
+  animation: hm-pulse 1.2s ease-in-out infinite;
+}
+@keyframes hm-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
 .session-item .meta {
   font-size: 11px;
   color: var(--text-faint);
