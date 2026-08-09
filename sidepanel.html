@@ -83,6 +83,7 @@
     <!-- Composer -->
     <footer class="composer-wrap">
       <form id="composer" class="composer" autocomplete="off">
+        <div id="attach-strip" class="attach-strip hidden"></div>
         <textarea
           id="prompt"
           rows="1"
@@ -101,8 +102,16 @@
       <div class="composer-meta">
         <span id="conn-dot" class="dot offline" title="Not connected"></span>
         <span id="conn-label">Not connected</span>
+        <span id="version-badge" class="version-badge"></span>
       </div>
     </footer>
+
+    <!-- Attachment preview overlay -->
+    <div id="preview" class="preview hidden" role="dialog" aria-modal="true" aria-label="Image preview">
+      <div class="preview-backdrop"></div>
+      <button id="preview-close" class="preview-close" type="button" title="Close (Esc)" aria-label="Close">×</button>
+      <img id="preview-img" alt="" />
+    </div>
   </div>
   <script src="vendor/dompurify.min.js"></script>
   <script src="vendor/marked.min.js"></script>

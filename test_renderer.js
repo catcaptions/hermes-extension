@@ -142,6 +142,38 @@ t('media: mediaKind routes extensions', () => {
   assert.strictEqual(mediaKind(''), 'other');
 });
 
+// ── data: URL attachments (TASK_BRIEF_2 task 2) ─────────────────
+
+t('media: @image:data: URL is extracted', () => {
+  const src = '@image:data:image/png;base64,iVBORw0KGgo=';
+  const { media, scrubbed } = extractTokens(src);
+  assert.strictEqual(media.length, 1);
+  assert.strictEqual(media[0], 'data:image/png;base64,iVBORw0KGgo=');
+  assert.ok(!scrubbed.includes('@image:data:'));
+});
+
+t('media: @image:data: inside fenced code is NOT extracted', () => {
+  const src = '```\n@image:data:image/png;base64,x\n```';
+  const { media, scrubbed } = extractTokens(src);
+  assert.strictEqual(media.length, 0);
+  assert.ok(scrubbed.includes('@image:data:image/png;base64,x'));
+});
+
+t('mediaKind: data:image/* is img', () => {
+  for (const u of ['data:image/png;base64,x', 'data:image/jpeg;base64,x', 'data:image/webp;base64,x', 'data:image/gif;base64,x']) {
+    assert.strictEqual(mediaKind(u), 'img', u);
+  }
+});
+
+t('mediaUrl: data:image passes through unchanged', () => {
+  assert.strictEqual(mediaUrl('data:image/png;base64,AAAA'), 'data:image/png;base64,AAAA');
+});
+
+t('mediaUrl: non-image data: garbage stays null', () => {
+  assert.strictEqual(mediaUrl('data:text/plain,hi'), null);
+  assert.strictEqual(mediaUrl('data:image/png;base64,AAAA'), 'data:image/png;base64,AAAA');
+});
+
 // ── @url: link attachments (IMAGE_DIAGNOSIS #4) ─────────────────
 
 t('url: backtick-quoted @url: becomes a sentinel', () => {

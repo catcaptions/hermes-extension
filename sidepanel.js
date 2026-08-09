@@ -24,6 +24,18 @@ const POLL_STALE_LIMIT_MS = 30000;
 // Trailing-edge throttle for streaming delta re-renders.
 const STREAM_RENDER_MS = 60;
 
+// Image paste: downscale before send (gateway POST limit ~1MB, vision
+// providers reject oversized data URLs). Cap longest side + total bytes.
+const MAX_IMAGE_SIDE = 1280;
+const MAX_DATA_URL_BYTES = 350 * 1024;
+
+// Local media bridge (media-bridge.py) — zero-config fallback for file://.
+const BRIDGE_BASE = 'http://127.0.0.1:8643';
+const BRIDGE_HINT = 'local file — start media-bridge.bat, or enable "Allow access to file URLs" in edge://extensions → Details, then reload the extension (see README)';
+
+// Hardcoded build stamp so the user can confirm the loaded build at a glance.
+const BUILD_STRING = 'build 2026-08-09 aa69cd6';
+
 // ── DOM ──────────────────────────────────────────────────────────
 
 const $ = (id) => document.getElementById(id);
@@ -52,6 +64,11 @@ const els = {
   btnSave: $('btn-save'),
   btnTest: $('btn-test'),
   btnRefreshSessions: $('btn-refresh-sessions'),
+  attachStrip: $('attach-strip'),
+  preview: $('preview'),
+  previewImg: $('preview-img'),
+  previewClose: $('preview-close'),
+  versionBadge: $('version-badge'),
 };
 
 // ── State ────────────────────────────────────────────────────────
@@ -69,6 +86,10 @@ let lastFingerprint = null;  // fingerprint of the last rendered message list
 let quietUntil = 0;          // poll adoption grace after a local stream ends
 let streamEndedAt = 0;       // used for the stale-limit guard
 let sessionMissing = false;  // active session 404'd server-side
+
+// Attachments (pasted/dropped images) awaiting send: { id, name, dataUrl }.
+const attachments = [];
+let attachId = 1;
 
 // ── Storage ──────────────────────────────────────────────────────
 
@@ -123,9 +144,10 @@ async function readJson(response) {
 }
 
 function errorMessage(payload, fallback) {
-  return String(
-    payload?.error?.message || payload?.error || payload?.message || fallback || 'Request failed',
-  );
+  const v = payload?.error?.message ?? payload?.error ?? payload?.message ?? fallback ?? 'Request failed';
+  // Object errors (unexpected shapes) → compact JSON; long bodies → truncated.
+  if (typeof v === 'object' && v !== null) return JSON.stringify(v).slice(0, 300);
+  return String(v).slice(0, 400);
 }
 
 function rows(payload) {
@@ -318,7 +340,7 @@ function setSending(on) {
     els.btnSend.title = 'Send';
     els.btnSend.setAttribute('aria-label', 'Send');
     els.prompt.disabled = false;
-    els.btnSend.disabled = !els.prompt.value.trim() || !settings.apiKey;
+    updateSendDisabled();
   }
 }
 
@@ -326,7 +348,7 @@ function autoResizePrompt() {
   const el = els.prompt;
   el.style.height = 'auto';
   el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
-  els.btnSend.disabled = sending || !el.value.trim() || !settings.apiKey;
+  updateSendDisabled();
 }
 
 function escapeHtml(s) {
@@ -335,6 +357,118 @@ function escapeHtml(s) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// ── Image paste / attachments ────────────────────────────────────
+
+function updateSendDisabled() {
+  const hasText = Boolean(els.prompt.value.trim());
+  els.btnSend.disabled = sending || (!hasText && attachments.length === 0) || !settings.apiKey;
+}
+
+function renderChips() {
+  els.attachStrip.classList.toggle('hidden', attachments.length === 0);
+  els.attachStrip.innerHTML = '';
+  for (const a of attachments) {
+    const chip = document.createElement('div');
+    chip.className = 'chip';
+    chip.title = a.name;
+    // Thumb is a data: URL we built ourselves — no sanitization needed.
+    const thumb = document.createElement('img');
+    thumb.src = a.dataUrl;
+    thumb.alt = '';
+    const label = document.createElement('span');
+    label.textContent = a.name;
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'chip-x';
+    x.textContent = '×';
+    x.title = 'Remove attachment';
+    x.setAttribute('aria-label', `Remove ${a.name}`);
+    x.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const i = attachments.findIndex((it) => it.id === a.id);
+      if (i >= 0) attachments.splice(i, 1);
+      renderChips();
+      updateSendDisabled();
+    });
+    chip.appendChild(thumb);
+    chip.appendChild(label);
+    chip.appendChild(x);
+    chip.addEventListener('click', () => openPreview(a.dataUrl, a.name));
+    els.attachStrip.appendChild(chip);
+  }
+  updateSendDisabled();
+}
+
+function loadImageEl(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const im = new Image();
+    im.onload = () => resolve(im);
+    im.onerror = () => reject(new Error('Image decode failed'));
+    im.src = dataUrl;
+  });
+}
+
+// Downscale to ≤MAX_IMAGE_SIDE and ≤MAX_DATA_URL_BYTES (PNG first; JPEG
+// fallback loop for photos/large captures). Never throws — callers fall
+// back to the original data URL on any canvas failure.
+async function downscaleImage(dataUrl) {
+  const img = await loadImageEl(dataUrl);
+  const scale = Math.min(1, MAX_IMAGE_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+  let w = Math.max(1, Math.round(img.naturalWidth * scale));
+  let h = Math.max(1, Math.round(img.naturalHeight * scale));
+  const draw = (tw, th, mime, q) => {
+    const c = document.createElement('canvas');
+    c.width = tw;
+    c.height = th;
+    c.getContext('2d').drawImage(img, 0, 0, tw, th);
+    return c.toDataURL(mime, q);
+  };
+  try {
+    let out = draw(w, h, 'image/png');
+    if (out.length > MAX_DATA_URL_BYTES) {
+      out = draw(w, h, 'image/jpeg', 0.82);
+      let guard = 0;
+      while (out.length > MAX_DATA_URL_BYTES && w > 64 && guard++ < 6) {
+        w = Math.max(1, Math.round(w * 0.7));
+        h = Math.max(1, Math.round(h * 0.7));
+        out = draw(w, h, 'image/jpeg', 0.82);
+      }
+    }
+    return out;
+  } catch {
+    return dataUrl;
+  }
+}
+
+function addAttachment(file, dataUrl) {
+  const name = (file && file.name) || `image-${attachId}.png`;
+  attachments.push({ id: attachId++, name, dataUrl });
+  renderChips();
+}
+
+function ingestImageFile(file) {
+  if (!file || !file.type || !file.type.startsWith('image/')) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataUrl = String(reader.result || '');
+    downscaleImage(dataUrl)
+      .then((scaled) => addAttachment(file, scaled))
+      .catch(() => addAttachment(file, dataUrl));
+  };
+  reader.readAsDataURL(file);
+}
+
+function openPreview(dataUrl, name) {
+  els.previewImg.src = dataUrl;
+  els.previewImg.alt = name || '';
+  els.preview.classList.remove('hidden');
+}
+
+function closePreview() {
+  els.preview.classList.add('hidden');
+  els.previewImg.src = '';
 }
 
 // ── Markdown / math / image rendering ──────────────────────────
@@ -357,10 +491,20 @@ function mathHtml(item) {
   }
 }
 
+// Bridge URL for local absolute paths (bridge serves them without the
+// browser's file-URL toggle). data:/http(s) are not bridge candidates.
+function bridgeUrl(raw) {
+  const p = String(raw || '').trim();
+  if (!/^[a-zA-Z]:[\\/]/.test(p) && !p.startsWith('/')) return null;
+  return `${BRIDGE_BASE}/media?path=${encodeURIComponent(p)}`;
+}
+
 // Route media by extension (renderer.mediaKind): img → <img>, audio/video →
-// <audio>/<video controls>, anything else → fallback anchor.
-function mediaElementHtml(raw, idx) {
-  const url = renderer.mediaUrl(raw);
+// <audio>/<video controls>, anything else → fallback block. srcOverride
+// lets a bridge-served element re-render with the bridge URL (no error
+// churn on every streamed delta).
+function mediaElementHtml(raw, idx, srcOverride) {
+  const url = srcOverride || renderer.mediaUrl(raw);
   const kind = renderer.mediaKind(raw);
   if (kind === 'img') {
     return `<img class="hm-img" data-hm-idx="${idx}" src="${escapeHtml(url || raw)}" alt="${escapeHtml(basename(raw))}">`;
@@ -371,16 +515,20 @@ function mediaElementHtml(raw, idx) {
   if (kind === 'video') {
     return `<video class="hm-media" data-hm-idx="${idx}" controls preload="none" src="${escapeHtml(url || '')}"></video>`;
   }
-  return fallbackAnchorHtml(raw);
+  return fallbackBlockHtml(raw);
 }
 
-function fallbackAnchorHtml(raw) {
+// Compact failure block: clickable path + actionable hint (TASK_BRIEF_2 #3).
+function fallbackBlockHtml(raw) {
   const url = renderer.mediaUrl(raw);
-  return `<a class="hm-img-fallback" href="${escapeHtml(url || '')}" title="${escapeHtml(raw)}">${escapeHtml(raw)}</a>`;
+  const href = escapeHtml(url || '');
+  return `<a class="hm-img-fallback" href="${href}" title="${escapeHtml(raw)}">${escapeHtml(raw)}</a><span class="hm-hint">${escapeHtml(BRIDGE_HINT)}</span>`;
 }
 
-function renderMarkdown(text, failed, tokens) {
+function renderMarkdown(text, ctx, tokens) {
   const { scrubbed, math, media, url, nonce } = tokens || renderer.extractTokens(text || '');
+  const failed = ctx?.failed || new Set();
+  const bridged = ctx?.bridged || new Set();
   let html;
   try {
     html = marked.parse(scrubbed, { gfm: true, breaks: true });
@@ -398,9 +546,10 @@ function renderMarkdown(text, failed, tokens) {
   html = html.replace(new RegExp(`⟦HIMG:${nonce}:(\\d+)⟧`, 'g'), (m, i) => {
     const raw = media[Number(i)];
     if (raw == null) return '';
-    // Known-failed media render as their fallback link directly, so a
+    // Known-failed media render as their fallback block directly, so a
     // streamed re-render never fires another error event (CRITIQUE #11).
-    return failed && failed.has(Number(i)) ? fallbackAnchorHtml(raw) : mediaElementHtml(raw, Number(i));
+    if (failed.has(Number(i))) return fallbackBlockHtml(raw);
+    return mediaElementHtml(raw, Number(i), bridged.has(Number(i)) ? bridgeUrl(raw) : null);
   });
   html = html.replace(new RegExp(`⟦HURL:${nonce}:(\\d+)⟧`, 'g'), (m, i) => {
     const u = url[Number(i)];
@@ -409,28 +558,59 @@ function renderMarkdown(text, failed, tokens) {
   return html;
 }
 
-function fallbackAnchorEl(raw) {
+function fallbackBlockEl(raw) {
   const a = document.createElement('a');
   a.className = 'hm-img-fallback';
   const url = renderer.mediaUrl(raw);
   if (url) a.href = url;
   a.title = raw;
   a.textContent = raw;
-  return a;
+  const hint = document.createElement('span');
+  hint.className = 'hm-hint';
+  hint.textContent = BRIDGE_HINT;
+  const wrap = document.createElement('span');
+  wrap.className = 'hm-fallback';
+  wrap.append(a, hint);
+  return wrap;
 }
 
+// Error chain for a failed element: file:// failed → try the local media
+// bridge once (probe element) → only then mark failed + show the hint
+// block. The `failed`/`bridged` sets drive re-renders so streaming never
+// churns (CRITIQUE #11; TASK_BRIEF_2 #3).
 function attachMediaFallbacks(scope, msg) {
-  const failed = msg._failedImgs;
+  const failed = msg._failedImgs || (msg._failedImgs = new Set());
+  const bridged = msg._bridged || (msg._bridged = new Set());
   for (const el of scope.querySelectorAll('.hm-img[data-hm-idx], .hm-media[data-hm-idx]')) {
     const idx = Number(el.dataset.hmIdx);
-    el.addEventListener(
-      'error',
-      () => {
+    el.addEventListener('error', () => {
+      const raw = msg._media[idx];
+      const b = bridgeUrl(raw);
+      if (!b) {
         failed.add(idx);
-        el.replaceWith(fallbackAnchorEl(msg._media[idx]));
-      },
-      { once: true },
-    );
+        el.replaceWith(fallbackBlockEl(raw));
+        return;
+      }
+      const probe = document.createElement(el.tagName.toLowerCase());
+      probe.className = el.className;
+      probe.style.cssText = el.style.cssText;
+      probe.src = b;
+      const ok = () => {
+        bridged.add(idx);
+        el.replaceWith(probe);
+      };
+      const bad = () => {
+        failed.add(idx);
+        el.replaceWith(fallbackBlockEl(raw));
+      };
+      if (probe.tagName === 'IMG') {
+        probe.onload = ok;
+        probe.onerror = bad;
+      } else {
+        probe.onloadedmetadata = ok;
+        probe.onerror = bad;
+      }
+    }, { once: true });
   }
 }
 
@@ -440,9 +620,10 @@ function renderMessageBody(msg) {
   const body = el.querySelector('.msg-body');
   if (!body) return;
   const failed = msg._failedImgs || (msg._failedImgs = new Set());
+  const bridged = msg._bridged || (msg._bridged = new Set());
   const tokens = renderer.extractTokens(msg.content || '');
   msg._media = tokens.media;
-  body.innerHTML = renderMarkdown(msg.content, failed, tokens);
+  body.innerHTML = renderMarkdown(msg.content, { failed, bridged }, tokens);
   attachMediaFallbacks(body, msg);
 }
 
@@ -612,6 +793,7 @@ async function refreshConnectionBadge() {
 async function beginNewChat() {
   if (sending) return;
   closeSessionMenu();
+  // Reset local state first so the UI never blocks on the server.
   activeSessionId = '';
   messages = [];
   lastSeenCount = null;
@@ -619,11 +801,26 @@ async function beginNewChat() {
   quietUntil = 0;
   streamEndedAt = 0;
   sessionMissing = false;
-  await saveSettings({ sessionId: '', sessionTitle: 'New chat' });
   els.sessionTitle.textContent = 'New chat';
   renderMessages();
   showBanner('');
   els.prompt.focus();
+
+  // Create the session server-side immediately so it shows up in the
+  // dropdown (TASK_BRIEF_2 #1). On failure, fall back to lazy creation on
+  // first send — the chat stays usable.
+  setConnection('busy', 'Creating session…');
+  try {
+    const session = await createSession('New chat');
+    activeSessionId = session.id;
+    await saveSettings({ sessionId: session.id, sessionTitle: session.title });
+    els.sessionTitle.textContent = session.title;
+    setConnection('online', baseUrl().replace(/^https?:\/\//, ''));
+  } catch (err) {
+    showBanner(`Could not create session (${err.message || err}) — will create on first message.`);
+    setConnection('offline', 'Create failed');
+    await saveSettings({ sessionId: '', sessionTitle: 'New chat' });
+  }
 }
 
 async function selectSession(id, title) {
@@ -673,7 +870,8 @@ async function openSessionMenu() {
 
 async function sendMessage(text) {
   const clean = String(text || '').trim();
-  if (!clean || sending) return;
+  const mediaLines = attachments.map((a) => `@image:${a.dataUrl}`);
+  if ((!clean && mediaLines.length === 0) || sending) return;
   if (!settings.apiKey) {
     openSettings(true);
     els.settingsStatus.textContent = 'Paste your API key first.';
@@ -689,7 +887,7 @@ async function sendMessage(text) {
   if (!activeSessionId) {
     try {
       setSending(true);
-      const session = await createSession(clean.slice(0, 48));
+      const session = await createSession(clean.slice(0, 48) || 'New chat');
       activeSessionId = session.id;
       els.sessionTitle.textContent = session.title;
       await saveSettings({ sessionId: session.id, sessionTitle: session.title });
@@ -701,7 +899,13 @@ async function sendMessage(text) {
     }
   }
 
-  const userMsg = { role: 'user', content: clean };
+  // One @image:<dataURL> line per attachment (gateway convention; renders
+  // back as <img>). Chips are consumed here — clear them.
+  const full = mediaLines.length ? `${clean}${clean ? '\n' : ''}${mediaLines.join('\n')}` : clean;
+  attachments.length = 0;
+  renderChips();
+
+  const userMsg = { role: 'user', content: full };
   const assistantMsg = { role: 'assistant', content: '', streaming: true };
   messages = [...messages, userMsg, assistantMsg];
   renderMessages();
@@ -709,9 +913,10 @@ async function sendMessage(text) {
   abortController = new AbortController();
 
   try {
-    // v1 body: plain message. browser_use toggle is reserved for later.
+    // v1 body: plain message (+ @image: data URLs as lines). browser_use
+    // toggle is reserved for later.
     const body = {
-      message: clean,
+      message: full,
       // When browser use lands: include page context here if settings.browserUse.
     };
 
@@ -848,10 +1053,45 @@ els.prompt.addEventListener('keydown', (e) => {
   }
 });
 
+// ── Attachment wiring (paste / drag-drop / preview) ──────────────
+
+els.prompt.addEventListener('paste', (e) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.kind !== 'file' || !item.type.startsWith('image/')) continue;
+    const file = item.getAsFile();
+    if (!file) continue;
+    e.preventDefault(); // keep raw binary out of the textarea
+    ingestImageFile(file);
+  }
+});
+
+els.composer.addEventListener('dragover', (e) => {
+  e.preventDefault(); // allow dropping onto the composer
+});
+els.composer.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const files = [...(e.dataTransfer?.files || [])].filter((f) => f.type.startsWith('image/'));
+  for (const file of files) ingestImageFile(file);
+});
+
+els.previewClose.addEventListener('click', closePreview);
+els.preview.addEventListener('click', (e) => {
+  if (e.target === els.preview || e.target.classList.contains('preview-backdrop')) closePreview();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !els.preview.classList.contains('hidden')) closePreview();
+});
+
 // ── Boot ─────────────────────────────────────────────────────────
 
 async function boot() {
   await loadSettings();
+  // Version badge: manifest version + hardcoded build stamp, so the user
+  // can instantly confirm the loaded build (TASK_BRIEF_2 #1).
+  const v = chrome?.runtime?.getManifest?.().version || '0.1.0';
+  els.versionBadge.textContent = `v${v} · ${BUILD_STRING}`;
   autoResizePrompt();
   renderMessages();
   startPolling();

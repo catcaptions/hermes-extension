@@ -133,9 +133,12 @@ function replaceUrls(line, n, url) {
 /**
  * Route a media path by file extension: 'img' | 'audio' | 'video' | 'other'
  * (IMAGE_DIAGNOSIS #2 — TTS/other tools emit audio; some emit video).
+ * `data:image/*` URLs are always images (pasted attachments, TASK_BRIEF_2).
  */
 function mediaKind(raw) {
-  const m = /\.([a-z0-9]+)(?:[?#].*)?$/i.exec(String(raw == null ? '' : raw).trim());
+  const p = String(raw == null ? '' : raw).trim();
+  if (/^data:image\//i.test(p)) return 'img';
+  const m = /\.([a-z0-9]+)(?:[?#].*)?$/i.exec(p);
   if (!m) return 'other';
   const ext = m[1].toLowerCase();
   if (IMG_EXTS.has(ext)) return 'img';
@@ -262,6 +265,8 @@ function mediaUrl(raw) {
   const p = String(raw || '').trim();
   if (!p) return null;
   if (/^(?:https?|file):\/\//i.test(p)) return p;
+  // Pasted attachments travel as data: URLs; pass them through untouched.
+  if (/^data:image\//i.test(p)) return p;
   let url = null;
   if (/^[a-zA-Z]:[\\/]/.test(p)) {
     url = `file:///${p.replace(/\\/g, '/')}`;

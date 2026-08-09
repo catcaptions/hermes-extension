@@ -399,6 +399,13 @@ code {
   text-decoration: underline dotted;
   word-break: break-all;
 }
+.msg-body .hm-hint {
+  display: block;
+  margin: 0 0 6px;
+  font-size: 11px;
+  color: var(--text-faint);
+  line-height: 1.4;
+}
 .msg-body .hm-media {
   display: block;
   max-width: 100%;
@@ -462,6 +469,7 @@ code {
 
 .composer {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   gap: 8px;
   padding: 10px 10px 10px 14px;
@@ -471,6 +479,57 @@ code {
   box-shadow: 0 1px 3px rgba(0,0,0,0.04);
   transition: border-color 0.15s, box-shadow 0.15s;
 }
+
+/* Attachment chip strip (pasted/dropped images) */
+.attach-strip {
+  display: flex;
+  gap: 8px;
+  flex: 1 1 100%;
+  overflow-x: auto;
+  padding-bottom: 6px;
+}
+.attach-strip.hidden { display: none; }
+.chip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-soft);
+  cursor: pointer;
+  max-width: 190px;
+  flex-shrink: 0;
+}
+.chip img {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+.chip > span {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.chip-x {
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 3px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.chip-x:hover { color: var(--text); background: var(--bg); }
 .composer:focus-within {
   border-color: #c8c8c8;
   box-shadow: 0 2px 8px rgba(0,0,0,0.06);
@@ -525,6 +584,50 @@ code {
   font-size: 11px;
   color: var(--text-faint);
 }
+.version-badge {
+  margin-left: auto;
+  opacity: 0.55;
+  white-space: nowrap;
+}
+
+/* Attachment preview overlay */
+.preview {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.preview.hidden { display: none; }
+.preview-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+}
+.preview img {
+  position: relative;
+  max-width: 90%;
+  max-height: 90vh;
+  border-radius: 10px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.45);
+}
+.preview-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 1;
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+.preview-close:hover { background: rgba(255, 255, 255, 0.3); }
 
 .dot {
   width: 7px;

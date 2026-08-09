@@ -28,11 +28,15 @@ The whole extension is **vanilla HTML/CSS/JS with no build step** — the client
 | Side panel chat UI (ChatGPT-clean) | ✅ |
 | Paste gateway URL + API key | ✅ |
 | Create session on first message | ✅ |
+| **`+` creates the session server-side immediately** | ✅ |
 | Stream replies via SSE | ✅ |
 | Markdown rendering (marked + DOMPurify) | ✅ |
 | LaTeX math (KaTeX: `$…$`, `$$…$$`, `\(…\)`, `\[…\]`) | ✅ |
 | Local media (`IMAGE:` / `MEDIA:` / `@image:` / `@media:` lines; img/audio/video) | ✅ |
+| Image paste + click-to-preview + downscale (`@image:data:…`) | ✅ |
 | `@url:` link attachments | ✅ |
+| Media bridge (local files, zero browser config) | ✅ |
+| Version badge in footer | ✅ |
 | Live updates from other clients (~3 s polling) | ✅ |
 | Session list + switch | ✅ |
 | Load message history | ✅ |
@@ -77,8 +81,9 @@ Plus `GET /v1/health` for the connection test.
 3. Enable **Developer mode**
 4. **Load unpacked** → select this folder
 5. Pin **Hermes Minimal**, click the icon (or `Alt+H`)
-6. **Optional but required for `IMAGE:` / `MEDIA:` / `@image:` lines:** in `chrome://extensions` → **Details** → enable **"Allow access to file URLs"**. Without it, local `file://` media is blocked and renders as clickable path links instead. **Reload the extension after toggling** so already-rendered messages re-render. (Plain `http(s)` image URLs in markdown work either way.)
-7. Get your API key — on Windows, double-click `Copy_API_Key.cmd` → paste into Settings → **Test connection** → **Save**
+6. **Optional but required for `IMAGE:` / `MEDIA:` / `@image:` lines:** in `chrome://extensions` → **Details** → enable **"Allow access to file URLs"**. Without it, local `file://` media is blocked and renders as clickable path links instead. **Reload the extension after toggling** so already-rendered messages re-render. (Plain `http(s)` image URLs and pasted images work either way.)
+7. **Alternative to step 6 — media bridge (zero browser config):** double-click `media-bridge.bat` (keeps running in a console window; Python 3 required) and local files serve via `http://127.0.0.1:8643` automatically. The panel tries `file://` first, then the bridge, before showing the hint block. See "Media bridge" below.
+8. Get your API key — on Windows, double-click `Copy_API_Key.cmd` → paste into Settings → **Test connection** → **Save**
 
 ## Layout (no build)
 
@@ -87,9 +92,11 @@ manifest.json       MV3 — sidePanel + storage only
 background.js       open panel on toolbar click
 sidepanel.html      shell
 sidepanel.css       light ChatGPT-like theme + markdown styles
-sidepanel.js        client: SSE parser, rendering pipeline, polling
+sidepanel.js        client: SSE parser, rendering pipeline, polling, paste
 renderer.js         pure markdown/media/math extraction (node-testable)
 test_renderer.js    unit tests — run: node test_renderer.js
+media-bridge.py     optional local media server (127.0.0.1:8643, stdlib-only)
+media-bridge.bat    launcher for media-bridge.py
 vendor/             pinned: marked 12.0.2, DOMPurify 3.1.6, KaTeX 0.16.11 (+ fonts)
 icons/              16/32/48/128
 Copy_API_Key.cmd    copies API_SERVER_KEY to clipboard
@@ -128,9 +135,24 @@ Request body used by v1:
 
 - Markdown via vendored [marked](https://github.com/markedjs/marked), sanitized with [DOMPurify](https://github.com/cure53/DOMPurify) before anything enters the DOM. GFM tables, task lists, fences, blockquotes, links, images, etc.
 - LaTeX math: `$…$` / `\(…\)` inline, `$$…$$` / `\[…\]` display — typeset with vendored [KaTeX](https://katex.org). Escaped `\$` and money-like `$5` stay literal; math inside fenced/indented code blocks is never touched.
-- **Local images**: content lines like `IMAGE:C:\Users\...\image.png`, `MEDIA:…` and the desktop app's `@image:…` / `@media:…` attachment lines become media in the chat — images (`png/jpg/gif/webp/bmp/avif/svg`) as inline `<img>`, audio (`mp3/ogg/wav/m4a/aac/flac/opus`) and video (`mp4/webm/mov/mkv`) as inline players. Windows/POSIX absolute paths are converted to `file://` URLs — requires the **"Allow access to file URLs"** toggle (see Install; **reload the extension after toggling** so existing messages re-render). If the toggle is off or the file is missing, the item degrades to a clickable path link. Anything without a media extension (or a `file:`-inaccessible path) renders as that link directly.
+- **Local images**: content lines like `IMAGE:C:\Users\...\image.png`, `MEDIA:…` and the desktop app's `@image:…` / `@media:…` attachment lines become media in the chat — images (`png/jpg/gif/webp/bmp/avif/svg`) as inline `<img>`, audio (`mp3/ogg/wav/m4a/aac/flac/opus`) and video (`mp4/webm/mov/mkv`) as inline players. Windows/POSIX absolute paths are converted to `file://` URLs; if the file can't load, the panel tries the **media bridge**, then degrades to a clickable path link with an actionable hint.
+- **Pasted images**: paste (or drag-drop) an image into the composer → thumbnail chips → click to preview (`Esc`/backdrop closes). On send each image is downscaled (longest side ≤1280 px, ≤~350 KB) and appended as an `@image:data:image/...` line — rendered as an inline image with **no file-URL toggle needed**. Known limitation: an agent's auxiliary vision may reject large data URLs (400) — the agent then works around it by saving the image to disk; desktop-app path attachments remain the reliable vision path.
 - **`@url:` link attachments** (desktop "Attached Context", e.g. `@url:`https://example.com/``, backticks optional) become clickable links, inline or standalone.
 - Streaming deltas re-render only the last message, throttled to ~60 ms, and autoscroll while the reply grows.
+
+**New chat** — the `+` button creates the session server-side immediately (it shows up in the session dropdown), instead of silently waiting for the first message. If creation fails, the panel says so and falls back to creating on first send.
+
+**Version badge** — the footer shows `v<manifest version> · <build stamp>` so you can confirm the loaded build (unpacked extensions only pick up code changes after a reload).
+
+## Media bridge
+
+`media-bridge.py` (stdlib-only) serves local media to the panel at `http://127.0.0.1:8643/media?path=<abs>` so images/audio/video show without the browser's file-URL toggle:
+
+- Run it: double-click `media-bridge.bat` (or `python media-bridge.py`) — keep the window open.
+- Serves only files under `%APPDATA%\Hermes`, your home directory, and `/tmp`; everything else gets a `403`.
+- The panel's fallback chain per item: `file://` → bridge → hint block ("start media-bridge.bat, or enable Allow access to file URLs…"). Nothing breaks if the bridge isn't running.
+
+## Browser use — later
 
 **Live updates** — the gateway has no push endpoint for sessions other clients wrote to, so the panel polls while it is visible and idle:
 
@@ -154,7 +176,7 @@ The settings checkbox is a placeholder. Plan:
 | Connection refused | `hermes gateway start` (or restart the scheduled task) |
 | Health OK but sessions 401 | Key mismatch between `.env` and running process — restart gateway after changing key |
 | Empty replies | Check Hermes logs; model backend may be down |
-| Local images render as path links | Enable **"Allow access to file URLs"** in `chrome://extensions` → Details, then **reload the extension** |
+| Local images render as path links | Run `media-bridge.bat`, or enable **"Allow access to file URLs"** in `chrome://extensions` → Details, then **reload the extension** |
 
 Probe from a terminal (replace `KEY`):
 
