@@ -1,0 +1,24 @@
+# ── Secrets & local environment ──────────────────────────────
+.env
+.env.*
+*.local
+*.key
+*.pem
+*.p12
+*.pfx
+
+# ── OS noise ─────────────────────────────────────────────────
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ── Editors / IDEs ───────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Scratch / tooling output ─────────────────────────────────
+.firecrawl/
+node_modules/
+dist/
