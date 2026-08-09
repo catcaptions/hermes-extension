@@ -6,16 +6,29 @@ URLs" toggle (the gateway itself serves no media over HTTP).
 
 Run:  python media-bridge.py   (or double-click media-bridge.bat)
 Serves: http://127.0.0.1:8643/media?path=<absolute path>
+        http://127.0.0.1:8643/save  (POST raw image bytes -> temp file, returns path)
 
 Only files under the allowed roots are served: %APPDATA%\\Hermes, the user
-home directory, and /tmp. Everything else gets a 403.
+home directory, and /tmp. Everything else gets a 403. /save writes to
+%TEMP%\\hm-media (inside the home root on Windows) and needs no extra access.
 """
 import http.server
+import json
 import os
+import secrets
 import sys
+import tempfile
 import urllib.parse
 
 HOST, PORT = '127.0.0.1', 8643
+
+SAVE_DIR = os.path.join(tempfile.gettempdir(), 'hm-media')
+MAX_SAVE_BYTES = 5 * 1024 * 1024
+
+SAVE_EXT = {
+    'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp',
+    'image/gif': 'gif',
+}
 
 ROOTS = []
 if os.environ.get('APPDATA'):
@@ -59,6 +72,39 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(body)
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path != '/save':
+            return self._send(404, b'not found')
+        ctype = self.headers.get('Content-Type', '').split(';')[0].strip().lower()
+        ext = SAVE_EXT.get(ctype, 'png')
+        try:
+            size = int(self.headers.get('Content-Length') or 0)
+        except ValueError:
+            size = 0
+        if size <= 0:
+            return self._send(400, b'empty body')
+        if size > MAX_SAVE_BYTES:
+            # Drain (bounded) so the client finishes writing before we
+            # reply — otherwise the connection resets mid-upload.
+            self.rfile.read(min(size, MAX_SAVE_BYTES + 4096))
+            return self._send(413, b'body too large (max 5 MB)')
+        body = self.rfile.read(size)
+        try:
+            os.makedirs(SAVE_DIR, exist_ok=True)
+            path = os.path.join(SAVE_DIR, secrets.token_hex(8) + '.' + ext)
+            with open(path, 'wb') as f:
+                f.write(body)
+        except OSError:
+            return self._send(500, b'write failed')
+        resp = json.dumps({'ok': True, 'path': path}).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(resp)))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(resp)
 
     def _send(self, code, msg):
         self.send_response(code)

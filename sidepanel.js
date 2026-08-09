@@ -27,8 +27,13 @@ const STREAM_RENDER_MS = 60;
 // Image paste: downscale before send (gateway POST limit ~1MB, vision
 // providers reject oversized data URLs). Cap longest side + total bytes.
 const MAX_IMAGE_SIDE = 1280;
-const MAX_DATA_URL_BYTES = 350 * 1024;
 
+const MAX_DATA_URL_BYTES = 350 * 1024;
+// Send-time transport (TASK_BRIEF_4): file path via bridge is primary; the
+// data URL fallback stays tiny (gateway sanitizer mangles multi-MB args).
+const PASTE_MAX_SIDE = 1024;
+
+const DATA_URL_CAP_BYTES = 100 * 1024;
 // Local media bridge (media-bridge.py) — the reliable path for local files
 // (Edge can't load file:// subresources from extension pages).
 const BRIDGE_BASE = 'http://127.0.0.1:8643';
@@ -448,6 +453,74 @@ function addAttachment(file, dataUrl) {
   const name = (file && file.name) || `image-${attachId}.png`;
   attachments.push({ id: attachId++, name, dataUrl });
   renderChips();
+}
+
+// ── Send-time transport (TASK_BRIEF_4): bridge file path > capped data URL ──
+
+// Send-time encode: ≤PASTE_MAX_SIDE px, JPEG q0.80 (PNG for alpha-capable
+// sources) — small blobs, small args.
+async function encodeForSend(dataUrl) {
+  const img = await loadImageEl(dataUrl);
+  const mime = /^data:(image\/\w+);/i.exec(dataUrl)?.[1] || 'image/png';
+  const scale = Math.min(1, PASTE_MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+  const w = Math.max(1, Math.round(img.naturalWidth * scale));
+  const h = Math.max(1, Math.round(img.naturalHeight * scale));
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  c.getContext('2d').drawImage(img, 0, 0, w, h);
+  return mime === 'image/jpeg' ? c.toDataURL('image/jpeg', 0.8) : c.toDataURL('image/png');
+}
+
+function dataUrlToBlob(dataUrl) {
+  const [head, b64] = dataUrl.split(',');
+  const mime = /^data:(.*?);/i.exec(head)?.[1] || 'image/png';
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return new Blob([arr], { type: mime });
+}
+
+// POST encoded bytes to the bridge /save → absolute path the message
+// carries as @image:C:\... (tiny tool arg; vision_analyze reads the file
+// itself). Null on any failure → caller falls back to a capped data URL.
+async function saveImageToBridge(dataUrl) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 5000);
+  try {
+    const res = await fetch(`${BRIDGE_BASE}/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': /^data:(.*?);/i.exec(dataUrl)?.[1] || 'image/png' },
+      body: dataUrlToBlob(dataUrl),
+      signal: ac.signal,
+    });
+    if (!res.ok) return null;
+    const j = await readJson(res);
+    return j && j.ok && typeof j.path === 'string' ? j.path : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Fallback transport: data URL capped ~DATA_URL_CAP_BYTES (re-encode 640px
+// q0.6 once; best effort if still over). Never throws.
+async function cappedDataUrl(dataUrl) {
+  if (String(dataUrl).length <= DATA_URL_CAP_BYTES) return dataUrl;
+  try {
+    const img = await loadImageEl(dataUrl);
+    const scale = Math.min(1, 640 / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.max(1, Math.round(img.naturalWidth * scale));
+    const h = Math.max(1, Math.round(img.naturalHeight * scale));
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    c.getContext('2d').drawImage(img, 0, 0, w, h);
+    return c.toDataURL('image/jpeg', 0.6);
+  } catch {
+    return dataUrl;
+  }
 }
 
 function ingestImageFile(file) {
@@ -894,8 +967,8 @@ async function openSessionMenu() {
 
 async function sendMessage(text) {
   const clean = String(text || '').trim();
-  const mediaLines = attachments.map((a) => `@image:${a.dataUrl}`);
-  if ((!clean && mediaLines.length === 0) || sending) return;
+  const pending = [...attachments];
+  if ((!clean && pending.length === 0) || sending) return;
   if (!settings.apiKey) {
     openSettings(true);
     els.settingsStatus.textContent = 'Paste your API key first.';
@@ -923,8 +996,22 @@ async function sendMessage(text) {
     }
   }
 
-  // One @image:<dataURL> line per attachment (gateway convention; renders
-  // back as <img>). Chips are consumed here — clear them.
+  // Upload pasted images to the bridge — file-path transport (TASK_BRIEF_4):
+  // one @image:C:\... line per attachment, rendered back via the bridge.
+  // Bridge down / save fails → capped data URL (gateway sanitizer mangles
+  // multi-MB data URLs in tool args). Chips are consumed after upload.
+  if (!sending) setSending(true);
+  const mediaLines = [];
+  for (const a of pending) {
+    try {
+      const enc = await encodeForSend(a.dataUrl);
+      const path = await saveImageToBridge(enc);
+      mediaLines.push(path ? `@image:${path}` : `@image:${await cappedDataUrl(enc)}`);
+    } catch {
+      mediaLines.push(`@image:${await cappedDataUrl(a.dataUrl)}`);
+    }
+  }
+
   const full = mediaLines.length ? `${clean}${clean ? '\n' : ''}${mediaLines.join('\n')}` : clean;
   attachments.length = 0;
   renderChips();
