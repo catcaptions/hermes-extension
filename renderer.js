@@ -10,12 +10,14 @@
  *   3. Replace sentinels: math → katex.renderToString, media → <img>.
  *
  * Pass-1 rules (all pinned by test_renderer.js):
- *   - media lines (IMAGE:/image:/MEDIA:/media:) and math are extracted only
- *     OUTSIDE fenced code and outside 4-space indented code blocks
- *     (GFM: ≥4 leading spaces after a blank line ⇒ code).
+ *   - media lines (IMAGE:/image:/MEDIA:/media:/@image:/@media:) and math are
+ *     extracted only OUTSIDE fenced code and outside 4-space indented code
+ *     blocks (GFM: ≥4 leading spaces after a blank line ⇒ code).
  *   - media lines are standalone-line only: `> IMAGE:…` / `- IMAGE:…` stay
  *     literal (Hermes emits media tags as standalone lines).
  *   - media wins over math on the same line (value taken verbatim).
+ *   - `@url:…` link attachments become ⟦HURL⟧ sentinels (inline, mid-line
+ *     allowed; replaced before the inline math scan).
  *   - `$` math: no whitespace adjacent to the delimiters, escaped `\$` is
  *     literal, `$$…$$` / `\[…\]` (any line position) render as display math.
  *   - ponytail: `$` inside backtick code spans is read as math (same as
@@ -25,9 +27,17 @@
 'use strict';
 
 const BLOCK_MATH_RE = /\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]/g;
-const MEDIA_RE = /^\s*(?:IMAGE|MEDIA)\s*:\s*(.+?)\s*$/i;
+// Standalone-line media tags; optional leading `@` covers the desktop app's
+// Obsidian-style `@image:` / `@media:` attachments (IMAGE_DIAGNOSIS #1).
+const MEDIA_RE = /^\s*@?(?:IMAGE|MEDIA)\s*:\s*(.+?)\s*$/i;
+// `@url:` link attachments (desktop "Attached Context"), backtick-optional.
+const URL_RE = /@url\s*:\s*(?:`([^`]+)`|(\S+))/gi;
 const FENCE_RE = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/;
 const INDENT_RE = /^(?: {4,}|\t)/;
+
+const IMG_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif', 'svg']);
+const AUDIO_EXTS = new Set(['mp3', 'ogg', 'wav', 'm4a', 'aac', 'flac', 'opus']);
+const VIDEO_EXTS = new Set(['mp4', 'webm', 'mov', 'mkv']);
 
 const NONCE_ALPHABET = '0123456789abcdef';
 
@@ -107,6 +117,33 @@ function replaceInline(line, n, math) {
   return res;
 }
 
+// `@url:…` → ⟦HURL:n:i⟧. Runs BEFORE the inline math scan so `$` inside a
+// URL is never read as math. Quoted form is taken verbatim; the bare form
+// strips trailing punctuation (sentence `@url:https://x.com/.` → no dot).
+function replaceUrls(line, n, url) {
+  if (!/@url\s*:/i.test(line)) return line;
+  return line.replace(URL_RE, (mm, quoted, bare) => {
+    const u = (quoted || (bare || '').replace(/[.,;:!?`]+$/, '')).trim();
+    if (!u) return mm;
+    url.push(u);
+    return `⟦HURL:${n}:${url.length - 1}⟧`;
+  });
+}
+
+/**
+ * Route a media path by file extension: 'img' | 'audio' | 'video' | 'other'
+ * (IMAGE_DIAGNOSIS #2 — TTS/other tools emit audio; some emit video).
+ */
+function mediaKind(raw) {
+  const m = /\.([a-z0-9]+)(?:[?#].*)?$/i.exec(String(raw == null ? '' : raw).trim());
+  if (!m) return 'other';
+  const ext = m[1].toLowerCase();
+  if (IMG_EXTS.has(ext)) return 'img';
+  if (AUDIO_EXTS.has(ext)) return 'audio';
+  if (VIDEO_EXTS.has(ext)) return 'video';
+  return 'other';
+}
+
 /**
  * Pass 1: split content into code regions (fenced / indented) and text
  * regions; in text regions extract media lines and math into sentinels.
@@ -116,6 +153,7 @@ function extractTokens(text) {
   const n = nonce();
   const math = [];
   const media = [];
+  const url = [];
   const out = [];
   const lines = String(text == null ? '' : text).replace(/\r\n/g, '\n').split('\n');
   let fence = null;    // { ch, len } while inside a fenced code block
@@ -140,8 +178,9 @@ function extractTokens(text) {
     });
     // Inline scan always runs on the residual (block math is already gone),
     // so `$$a$$ and $b$` extracts both instead of swallowing the inline one.
+    // `@url:` is replaced first so `$` inside a URL stays literal.
     for (const line of scrubbed.split('\n')) {
-      out.push(replaceInline(line, n, math));
+      out.push(replaceInline(replaceUrls(line, n, url), n, math));
     }
     run = [];
   };
@@ -190,21 +229,27 @@ function extractTokens(text) {
   }
   flushRun();
 
-  return { scrubbed: out.join('\n'), math, media, nonce: n };
+  return { scrubbed: out.join('\n'), math, media, url, nonce: n };
 }
 
 /**
- * Replace math sentinels that ended up inside HTML attributes (link
- * destinations, image alt/title) with percent-encoded raw TeX instead of
- * KaTeX HTML. Without this, `[x]($y$)` becomes attribute soup: the KaTeX
- * markup lands inside href="…" (BUG-3). Must run BEFORE the generic
- * sentinel replacement.
+ * Replace math/url sentinels that ended up inside HTML attributes (link
+ * destinations, image alt/title) with percent-encoded raw values instead of
+ * KaTeX HTML / anchors. Without this, `[x]($y$)` becomes attribute soup:
+ * the KaTeX markup lands inside href="…" (BUG-3). Must run BEFORE the
+ * generic sentinel replacement.
  */
-function fixAttributeSentinels(html, n, math) {
-  const re = new RegExp(`⟦HMTH:${n}:(\\d+)⟧`, 'g');
+function fixAttributeSentinels(html, n, math, url) {
+  const re = new RegExp(`⟦(?:HMTH|HURL):${n}:(\\d+)⟧`, 'g');
   return html.replace(/(href|src|alt|title)="([^"]*)"/g, (m, attr, val) => {
-    if (!val.includes('⟦HMTH')) return m;
-    return `${attr}="${val.replace(re, (mm, i) => encodeURIComponent(math[Number(i)]?.tex ?? ''))}"`;
+    if (!val.includes('⟦')) return m;
+    return `${attr}="${val.replace(re, (mm, i) => {
+      // Math tex: encodeURIComponent (it lives inside a path/query context).
+      // URLs: encodeURI preserves the scheme (`://` must survive href=).
+      const raw = mm.startsWith('⟦HMTH') ? math[Number(i)]?.tex : url[Number(i)];
+      const enc = mm.startsWith('⟦HMTH') ? encodeURIComponent : encodeURI;
+      return enc(raw ?? '');
+    })}"`;
   });
 }
 
@@ -237,7 +282,7 @@ function fingerprint(msgs) {
   return JSON.stringify((msgs || []).map((m) => `${m && m.role}\u0000${m && m.content != null ? String(m.content) : ''}`));
 }
 
-const api = { extractTokens, scanInlineMath, mediaUrl, fingerprint, fixAttributeSentinels };
+const api = { extractTokens, scanInlineMath, mediaUrl, mediaKind, fingerprint, fixAttributeSentinels };
 
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else globalThis.renderer = api;

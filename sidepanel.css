@@ -399,6 +399,14 @@ code {
   text-decoration: underline dotted;
   word-break: break-all;
 }
+.msg-body .hm-media {
+  display: block;
+  max-width: 100%;
+  margin: 8px 0;
+}
+.msg-body .hm-url {
+  word-break: break-all;
+}
 
 .msg.user .msg-body {
   background: var(--user-bg);

@@ -31,7 +31,8 @@ The whole extension is **vanilla HTML/CSS/JS with no build step** — the client
 | Stream replies via SSE | ✅ |
 | Markdown rendering (marked + DOMPurify) | ✅ |
 | LaTeX math (KaTeX: `$…$`, `$$…$$`, `\(…\)`, `\[…\]`) | ✅ |
-| Local images (`IMAGE:` / `image:` / `MEDIA:` lines) | ✅ |
+| Local media (`IMAGE:` / `MEDIA:` / `@image:` / `@media:` lines; img/audio/video) | ✅ |
+| `@url:` link attachments | ✅ |
 | Live updates from other clients (~3 s polling) | ✅ |
 | Session list + switch | ✅ |
 | Load message history | ✅ |
@@ -76,7 +77,7 @@ Plus `GET /v1/health` for the connection test.
 3. Enable **Developer mode**
 4. **Load unpacked** → select this folder
 5. Pin **Hermes Minimal**, click the icon (or `Alt+H`)
-6. **Optional but required for `IMAGE:` lines:** in `chrome://extensions` → **Details** → enable **"Allow access to file URLs"**. Without it, local `file://` images are blocked and render as clickable path links instead. (Plain `http(s)` image URLs in markdown work either way.)
+6. **Optional but required for `IMAGE:` / `MEDIA:` / `@image:` lines:** in `chrome://extensions` → **Details** → enable **"Allow access to file URLs"**. Without it, local `file://` media is blocked and renders as clickable path links instead. **Reload the extension after toggling** so already-rendered messages re-render. (Plain `http(s)` image URLs in markdown work either way.)
 7. Get your API key — on Windows, double-click `Copy_API_Key.cmd` → paste into Settings → **Test connection** → **Save**
 
 ## Layout (no build)
@@ -127,7 +128,8 @@ Request body used by v1:
 
 - Markdown via vendored [marked](https://github.com/markedjs/marked), sanitized with [DOMPurify](https://github.com/cure53/DOMPurify) before anything enters the DOM. GFM tables, task lists, fences, blockquotes, links, images, etc.
 - LaTeX math: `$…$` / `\(…\)` inline, `$$…$$` / `\[…\]` display — typeset with vendored [KaTeX](https://katex.org). Escaped `\$` and money-like `$5` stay literal; math inside fenced/indented code blocks is never touched.
-- **Local images**: content lines like `IMAGE:C:\Users\...\image.png` (also `image:` / `MEDIA:`) become images in the chat. Windows/POSIX absolute paths are converted to `file://` URLs — requires the **"Allow access to file URLs"** toggle (see Install). If the toggle is off or the file is missing, the image degrades to a clickable path link.
+- **Local images**: content lines like `IMAGE:C:\Users\...\image.png`, `MEDIA:…` and the desktop app's `@image:…` / `@media:…` attachment lines become media in the chat — images (`png/jpg/gif/webp/bmp/avif/svg`) as inline `<img>`, audio (`mp3/ogg/wav/m4a/aac/flac/opus`) and video (`mp4/webm/mov/mkv`) as inline players. Windows/POSIX absolute paths are converted to `file://` URLs — requires the **"Allow access to file URLs"** toggle (see Install; **reload the extension after toggling** so existing messages re-render). If the toggle is off or the file is missing, the item degrades to a clickable path link. Anything without a media extension (or a `file:`-inaccessible path) renders as that link directly.
+- **`@url:` link attachments** (desktop "Attached Context", e.g. `@url:`https://example.com/``, backticks optional) become clickable links, inline or standalone.
 - Streaming deltas re-render only the last message, throttled to ~60 ms, and autoscroll while the reply grows.
 
 **Live updates** — the gateway has no push endpoint for sessions other clients wrote to, so the panel polls while it is visible and idle:
@@ -152,7 +154,7 @@ The settings checkbox is a placeholder. Plan:
 | Connection refused | `hermes gateway start` (or restart the scheduled task) |
 | Health OK but sessions 401 | Key mismatch between `.env` and running process — restart gateway after changing key |
 | Empty replies | Check Hermes logs; model backend may be down |
-| Local images render as path links | Enable **"Allow access to file URLs"** in `chrome://extensions` → Details, then reopen the panel |
+| Local images render as path links | Enable **"Allow access to file URLs"** in `chrome://extensions` → Details, then **reload the extension** |
 
 Probe from a terminal (replace `KEY`):
 

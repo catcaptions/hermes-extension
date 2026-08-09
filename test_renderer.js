@@ -6,7 +6,7 @@
 'use strict';
 
 const assert = require('node:assert');
-const { extractTokens, mediaUrl, fingerprint, fixAttributeSentinels } = require('./renderer.js');
+const { extractTokens, mediaUrl, mediaKind, fingerprint, fixAttributeSentinels } = require('./renderer.js');
 
 let passed = 0;
 const failures = [];
@@ -90,6 +90,92 @@ t('media: blank line before 4-space line makes it an indented code block', () =>
 t('media: empty value is not extracted', () => {
   const { media } = extractTokens('IMAGE:\n');
   assert.strictEqual(media.length, 0);
+});
+
+// ── @image: / @media: desktop attachments (IMAGE_DIAGNOSIS #1) ───
+
+t('media: @image: prefix is extracted (desktop attachment)', () => {
+  const src = '@image:C:\\Users\\lasis\\AppData\\Roaming\\Hermes\\composer-images\\a.png';
+  const { media, scrubbed } = extractTokens(src);
+  assert.strictEqual(media.length, 1);
+  assert.strictEqual(media[0], 'C:\\Users\\lasis\\AppData\\Roaming\\Hermes\\composer-images\\a.png');
+  assert.ok(!scrubbed.includes('@image:'));
+  assert.match(scrubbed, /⟦HIMG:[0-9a-f]+:0⟧/);
+});
+
+t('media: @media: prefix is extracted', () => {
+  const { media } = extractTokens('@media:C:\\x\\d.mp3');
+  assert.strictEqual(media.length, 1);
+  assert.strictEqual(media[0], 'C:\\x\\d.mp3');
+});
+
+t('media: mixed text around @image: line', () => {
+  const src = 'text\n@image:C:\\x\\e.png\ntext';
+  const { media } = extractTokens(src);
+  assert.strictEqual(media.length, 1);
+});
+
+t('media: @image: inside fenced code is NOT extracted (guard preserved)', () => {
+  const src = '```\n@image:C:\\x\\y.png\n```';
+  const { media, scrubbed } = extractTokens(src);
+  assert.strictEqual(media.length, 0);
+  assert.ok(scrubbed.includes('@image:C:\\x\\y.png'));
+});
+
+t('media: @image: with spaces in path → encoded file URL', () => {
+  assert.strictEqual(mediaUrl('C:\\Users\\lasis\\My Folder\\pic.png'), 'file:///C:/Users/lasis/My%20Folder/pic.png');
+});
+
+t('media: mediaKind routes extensions', () => {
+  for (const f of ['a.png', 'a.jpg', 'a.jpeg', 'a.gif', 'a.webp', 'a.bmp', 'a.avif', 'a.svg', 'a.PNG']) {
+    assert.strictEqual(mediaKind(f), 'img', f);
+  }
+  for (const f of ['a.mp3', 'a.ogg', 'a.wav', 'a.m4a', 'a.aac', 'a.flac', 'a.opus']) {
+    assert.strictEqual(mediaKind(f), 'audio', f);
+  }
+  for (const f of ['a.mp4', 'a.webm', 'a.mov', 'a.mkv']) {
+    assert.strictEqual(mediaKind(f), 'video', f);
+  }
+  assert.strictEqual(mediaKind('a.txt'), 'other');
+  assert.strictEqual(mediaKind('a.png?x=1'), 'img');
+  assert.strictEqual(mediaKind('noext'), 'other');
+  assert.strictEqual(mediaKind(''), 'other');
+});
+
+// ── @url: link attachments (IMAGE_DIAGNOSIS #4) ─────────────────
+
+t('url: backtick-quoted @url: becomes a sentinel', () => {
+  const src = 'See @url:`https://canvasui.dev/` for details';
+  const { url, scrubbed } = extractTokens(src);
+  assert.strictEqual(url.length, 1);
+  assert.strictEqual(url[0], 'https://canvasui.dev/');
+  assert.ok(!scrubbed.includes('@url:'));
+  assert.match(scrubbed, /⟦HURL:[0-9a-f]+:0⟧/);
+});
+
+t('url: bare @url: mid-sentence, trailing punctuation stripped', () => {
+  const { url } = extractTokens('check @url:https://example.com/x. done');
+  assert.strictEqual(url.length, 1);
+  assert.strictEqual(url[0], 'https://example.com/x');
+});
+
+t('url: not inside fenced code', () => {
+  const src = '```\n@url:https://example.com/x\n```';
+  const { url, scrubbed } = extractTokens(src);
+  assert.strictEqual(url.length, 0);
+  assert.ok(scrubbed.includes('@url:https://example.com/x'));
+});
+
+t('url: dollars inside a URL are not read as math', () => {
+  const { url, math } = extractTokens('@url:https://x.com/$a$');
+  assert.strictEqual(url.length, 1);
+  assert.strictEqual(url[0], 'https://x.com/$a$');
+  assert.strictEqual(math.length, 0);
+});
+
+t('attr: url sentinel in link destination is percent-encoded (BUG-3 class)', () => {
+  const out = fixAttributeSentinels('<p><a href="⟦HURL:abc:0⟧">go</a></p>', 'abc', [], ['https://x.com/a b']);
+  assert.strictEqual(out, '<p><a href="https://x.com/a%20b">go</a></p>');
 });
 
 t('media: wins over math on the same line (pinned)', () => { // critique #19

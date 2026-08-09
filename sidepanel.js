@@ -357,9 +357,21 @@ function mathHtml(item) {
   }
 }
 
-function imgHtml(raw, idx) {
+// Route media by extension (renderer.mediaKind): img → <img>, audio/video →
+// <audio>/<video controls>, anything else → fallback anchor.
+function mediaElementHtml(raw, idx) {
   const url = renderer.mediaUrl(raw);
-  return `<img class="hm-img" data-hm-idx="${idx}" src="${escapeHtml(url || raw)}" alt="${escapeHtml(basename(raw))}">`;
+  const kind = renderer.mediaKind(raw);
+  if (kind === 'img') {
+    return `<img class="hm-img" data-hm-idx="${idx}" src="${escapeHtml(url || raw)}" alt="${escapeHtml(basename(raw))}">`;
+  }
+  if (kind === 'audio') {
+    return `<audio class="hm-media" data-hm-idx="${idx}" controls preload="none" src="${escapeHtml(url || '')}"></audio>`;
+  }
+  if (kind === 'video') {
+    return `<video class="hm-media" data-hm-idx="${idx}" controls preload="none" src="${escapeHtml(url || '')}"></video>`;
+  }
+  return fallbackAnchorHtml(raw);
 }
 
 function fallbackAnchorHtml(raw) {
@@ -368,28 +380,31 @@ function fallbackAnchorHtml(raw) {
 }
 
 function renderMarkdown(text, failed, tokens) {
-  const { scrubbed, math, media, nonce } = tokens || renderer.extractTokens(text || '');
+  const { scrubbed, math, media, url, nonce } = tokens || renderer.extractTokens(text || '');
   let html;
   try {
     html = marked.parse(scrubbed, { gfm: true, breaks: true });
   } catch {
     html = escapeHtml(scrubbed);
   }
-  // Sanitize BEFORE any of our own HTML is introduced; media/math tags are
-  // constructed by us below and never pass through DOMPurify (CRITIQUE: the
-  // default allowlist would strip file: URIs anyway).
+  // Sanitize BEFORE any of our own HTML is introduced; media/math/url tags
+  // are constructed by us below and never pass through DOMPurify (CRITIQUE:
+  // the default allowlist would strip file: URIs anyway).
   html = DOMPurify.sanitize(html);
-  // Math sentinels inside attributes (link destinations, img alt/title)
-  // become percent-encoded TeX, not KaTeX HTML (BUG-3). Run before the
-  // generic replacement below.
-  html = renderer.fixAttributeSentinels(html, nonce, math);
+  // Sentinels inside attributes (link destinations, img alt/title) become
+  // percent-encoded raw values, not HTML (BUG-3). Before the generic pass.
+  html = renderer.fixAttributeSentinels(html, nonce, math, url);
   html = html.replace(new RegExp(`⟦HMTH:${nonce}:(\\d+)⟧`, 'g'), (m, i) => mathHtml(math[Number(i)]));
   html = html.replace(new RegExp(`⟦HIMG:${nonce}:(\\d+)⟧`, 'g'), (m, i) => {
     const raw = media[Number(i)];
     if (raw == null) return '';
-    // Known-failed images render as their fallback link directly, so a
+    // Known-failed media render as their fallback link directly, so a
     // streamed re-render never fires another error event (CRITIQUE #11).
-    return failed && failed.has(Number(i)) ? fallbackAnchorHtml(raw) : imgHtml(raw, Number(i));
+    return failed && failed.has(Number(i)) ? fallbackAnchorHtml(raw) : mediaElementHtml(raw, Number(i));
+  });
+  html = html.replace(new RegExp(`⟦HURL:${nonce}:(\\d+)⟧`, 'g'), (m, i) => {
+    const u = url[Number(i)];
+    return u ? `<a class="hm-url" href="${escapeHtml(u)}" target="_blank" rel="noopener">${escapeHtml(u)}</a>` : '';
   });
   return html;
 }
@@ -406,13 +421,13 @@ function fallbackAnchorEl(raw) {
 
 function attachMediaFallbacks(scope, msg) {
   const failed = msg._failedImgs;
-  for (const img of scope.querySelectorAll('.hm-img[data-hm-idx]')) {
-    const idx = Number(img.dataset.hmIdx);
-    img.addEventListener(
+  for (const el of scope.querySelectorAll('.hm-img[data-hm-idx], .hm-media[data-hm-idx]')) {
+    const idx = Number(el.dataset.hmIdx);
+    el.addEventListener(
       'error',
       () => {
         failed.add(idx);
-        img.replaceWith(fallbackAnchorEl(msg._media[idx]));
+        el.replaceWith(fallbackAnchorEl(msg._media[idx]));
       },
       { once: true },
     );
