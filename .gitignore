@@ -22,3 +22,5 @@ Desktop.ini
 .firecrawl/
 node_modules/
 dist/
+__pycache__/
+*.pyc
