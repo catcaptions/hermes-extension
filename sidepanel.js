@@ -821,7 +821,10 @@ function updateRunningIndicator() {
 
 const CMD_POPOVER_MAX_HEIGHT = 260;
 
-let cmdPopover = null; // { el, listEl, filterEl, items, onSelect, renderItem, filter, visible, highlight, emptyMessage }
+let cmdPopover = null; // { el, listEl, items, onSelect, renderItem, filter, visible, highlight, emptyMessage }
+// TASK_BRIEF_9: '/name' last inserted by the skills menu — while the prompt
+// still starts with it, a fresh '/' hasn't been typed, so the menu stays closed.
+let slashInserted = null;
 
 function cmdDefaultRow(item) {
   const label = escapeHtml(item?.label ?? '');
@@ -1006,6 +1009,79 @@ function showCommandPopover({
     emptyMessage,
   };
   cmdRenderList();
+}
+
+// ── `/` skills menu (TASK_BRIEF_9) ──────────────────────────────
+// Typing '/' in the prompt opens the popover over the Hermes skills list
+// (fetched fresh from the gateway on every open — local + cheap, no cache).
+// Filtering, keyboard nav, Enter/Escape/Tab are all Phase 0 popover behavior.
+
+function skillItem(s) {
+  const name = String(s?.name || '').trim();
+  if (!name) return null;
+  const desc = String(s?.description || '').trim();
+  return {
+    id: name,
+    label: name,
+    sublabel: desc.length > 90 ? `${desc.slice(0, 87)}…` : desc,
+    group: String(s?.category || '').trim() || 'General',
+    meta: s,
+  };
+}
+
+function insertSkill(item) {
+  const el = els.prompt;
+  const end = typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length;
+  const head = el.value.slice(0, end);
+  const inserted = `/${item.name}`;
+  if (head.startsWith('/')) el.value = inserted + el.value.slice(end);
+  slashInserted = inserted; // suppress reopening on the just-inserted token
+  closeCommandPopover();
+  autoResizePrompt();
+  const pos = el.value.length;
+  el.setSelectionRange(pos, pos); // caret to the end, focus stays in #prompt
+  el.focus();
+}
+
+async function openSkillsMenu(term) {
+  // Re-check after the (cheap, local) fetch: the user may have deleted the
+  // '/' or another open already took over.
+  if (isCommandPopoverOpen() || !els.prompt.value.startsWith('/')) return;
+  try {
+    const res = await hermesFetch('/v1/skills');
+    if (!res.ok) return; // silent — the next '/' re-fetches
+    const payload = await readJson(res);
+    if (isCommandPopoverOpen() || !els.prompt.value.startsWith('/')) return;
+    const items = rows(payload).map(skillItem).filter(Boolean);
+    showCommandPopover({
+      items,
+      onSelect: insertSkill,
+      filterText: els.prompt.value.slice(1) || '',
+      placeholder: 'Filter skills…',
+      emptyMessage: 'No skills match',
+    });
+  } catch {
+    // gateway unreachable — no menu; typing continues as normal
+  }
+}
+
+// Prompt typing: opens the menu on a fresh '/', refilters on everything
+// after the '/', and closes when the leading '/' is deleted.
+function updateSlashMenu() {
+  const v = els.prompt.value;
+  if (slashInserted) {
+    if (v.startsWith(slashInserted)) return;
+    slashInserted = null; // token gone — normal rules resume
+  }
+  if (!v.startsWith('/')) {
+    if (isCommandPopoverOpen()) closeCommandPopover();
+    return;
+  }
+  if (isCommandPopoverOpen()) {
+    setCommandPopoverFilter(v.slice(1));
+  } else {
+    openSkillsMenu(v.slice(1));
+  }
 }
 
 // ── Live updates (polling) ─────────────────────────────────────
@@ -1198,6 +1274,7 @@ async function sendMessage(text) {
   }
 
   showBanner('');
+  closeCommandPopover(); // a '/' menu can't float over a disabled prompt
   els.prompt.value = '';
   autoResizePrompt();
 
@@ -1382,8 +1459,9 @@ els.btnSend.addEventListener('click', (e) => {
 
 els.prompt.addEventListener('input', autoResizePrompt);
 els.prompt.addEventListener('input', () => {
-  // TASK_BRIEF_8 hook: while a popover is open, keystrokes refilter it.
-  if (isCommandPopoverOpen()) setCommandPopoverFilter(els.prompt.value);
+  // TASK_BRIEF_9: '/' menu open/sync/close; Phase 0 hook becomes the
+  // caller-owned input listener the popover API anticipates.
+  updateSlashMenu();
 });
 els.prompt.addEventListener('keydown', (e) => {
   if (isCommandPopoverOpen()) {
