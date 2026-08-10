@@ -111,6 +111,7 @@ const attachedContext = [];
 let modelPref = null;   // { provider, model } for the active session
 let serverModel = null; // { provider, model } from /api/model/options
 let modelLoading = false; // one options fetch in flight at a time
+let modelLocking = false; // one model-lock POST in flight at a time
 
 // ── Storage ──────────────────────────────────────────────────────
 
@@ -357,11 +358,13 @@ function setSending(on) {
     els.btnSend.title = 'Stop';
     els.btnSend.setAttribute('aria-label', 'Stop');
     els.prompt.disabled = true;
+    els.btnModel.disabled = true; // CRITIQUE_BRIEF_11 #7: no model switch mid-stream
     setConnection('busy', 'Hermes is working…');
   } else {
     els.btnSend.title = 'Send';
     els.btnSend.setAttribute('aria-label', 'Send');
     els.prompt.disabled = false;
+    els.btnModel.disabled = false;
     updateSendDisabled();
   }
 }
@@ -1436,6 +1439,7 @@ function loadModelPref() {
 }
 
 function storeModelPref() {
+  if (!modelPref?.model || !modelPref?.provider) return; // nothing to persist
   try {
     localStorage.setItem(modelPrefKey(), JSON.stringify(modelPref));
   } catch {
@@ -1471,7 +1475,9 @@ function renderModelItem(item, selected) {
 }
 
 // Fetch fresh on every open (cheap, local gateway). Returns the payload or
-// null; a failed fetch leaves the pill on its 'model?' fallback (spec 7).
+// null. On failure the pill keeps its known in-memory model (stored pref or
+// a previously reported server model) and only falls back to 'model?' when
+// nothing is known yet (CRITIQUE_BRIEF_11 #1).
 async function fetchModelOptions() {
   if (modelLoading) return null;
   modelLoading = true;
@@ -1479,14 +1485,14 @@ async function fetchModelOptions() {
     const res = await hermesFetch('/api/model/options');
     const payload = await readJson(res);
     if (!res.ok) {
-      els.btnModel.textContent = 'model?';
+      if (!modelPref?.model && !serverModel?.model) els.btnModel.textContent = 'model?';
       return null;
     }
     serverModel = { provider: payload?.provider, model: payload?.model };
     updateModelPill();
     return payload;
   } catch {
-    els.btnModel.textContent = 'model?';
+    if (!modelPref?.model && !serverModel?.model) els.btnModel.textContent = 'model?';
     return null;
   } finally {
     modelLoading = false;
@@ -1494,7 +1500,11 @@ async function fetchModelOptions() {
 }
 
 async function openModelPicker() {
-  if (modelLoading) return; // a fetch is already in flight — no-op click
+  if (modelLoading) {
+    // CRITIQUE_BRIEF_11 #2: a dead click is a silent no-op — say why.
+    showBanner('Models are still loading — try again in a moment.', 'info');
+    return;
+  }
   showBanner('');
   const payload = await fetchModelOptions();
   if (!payload) {
@@ -1520,15 +1530,18 @@ async function openModelPicker() {
 }
 
 async function applyModel(item) {
+  if (modelLocking) return; // CRITIQUE_BRIEF_11 #5: re-Enter/click mid-POST is ignored
   const { provider, model } = item.meta;
   const prev = modelPref;
   modelPref = { provider, model };
   updateModelPill();
   if (!activeSessionId) {
-    storeModelPref(); // no session yet — the first send carries the lock
+    // CRITIQUE_BRIEF_11 #3: no session yet — keep the choice in memory only
+    // (never write the junk 'modelPref:' key); the first send persists it.
     closeCommandPopover();
     return;
   }
+  modelLocking = true;
   try {
     const res = await hermesFetch(
       `/api/sessions/${encodeURIComponent(activeSessionId)}/model`,
@@ -1546,6 +1559,8 @@ async function applyModel(item) {
     updateModelPill();
     showBanner(`Model lock failed: ${err.message || err}`);
     return;
+  } finally {
+    modelLocking = false;
   }
   storeModelPref();
   updateModelPill();
@@ -1825,6 +1840,10 @@ async function sendMessage(text) {
       body.model = lock.model;
       body.require_model_lock = true;
     }
+    // CRITIQUE_BRIEF_11 #3: a pre-session choice (no junk 'modelPref:' key
+    // was written at pick time) is persisted under the real session key here,
+    // on the first send that gives us a session id. No-op otherwise.
+    storeModelPref();
 
     const res = await hermesFetch(
       `/api/sessions/${encodeURIComponent(activeSessionId)}/chat/stream`,
