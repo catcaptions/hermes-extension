@@ -844,6 +844,8 @@ function isCommandPopoverOpen() { return Boolean(cmdPopover); }
 function setCommandPopoverFilter(text) {
   if (!cmdPopover) return;
   cmdPopover.filter = String(text ?? '');
+  const filterEl = cmdPopover.el.querySelector('.cmd-filter');
+  if (filterEl) filterEl.value = cmdPopover.filter; // keep the box in sync (review NIT #7)
   cmdRenderList();
 }
 
@@ -947,9 +949,6 @@ function cmdHandleKey(e) {
     case 'Tab':
       closeCommandPopover(); // let the default focus move happen
       break;
-    default:
-      // Type-ahead hook: keep the popover filter in sync with the prompt.
-      if (e.target === els.prompt) setCommandPopoverFilter(els.prompt.value);
   }
 }
 
@@ -969,9 +968,8 @@ function showCommandPopover({
   pop.id = 'cmd-popover';
   pop.setAttribute('aria-label', 'Command popover');
 
-  let filterEl = null;
   if (filterText !== null) {
-    filterEl = document.createElement('input');
+    const filterEl = document.createElement('input');
     filterEl.type = 'text';
     filterEl.className = 'cmd-filter';
     filterEl.placeholder = placeholder;
@@ -999,7 +997,6 @@ function showCommandPopover({
   cmdPopover = {
     el: pop,
     listEl: ul,
-    filterEl,
     items: Array.isArray(items) ? items : [],
     onSelect,
     renderItem,
