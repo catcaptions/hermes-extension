@@ -63,6 +63,7 @@ const els = {
   composer: $('composer'),
   connDot: $('conn-dot'),
   connLabel: $('conn-label'),
+  btnModel: $('btn-model'),
   btnSessions: $('btn-sessions'),
   btnNew: $('btn-new'),
   btnSettings: $('btn-settings'),
@@ -103,6 +104,13 @@ let attachId = 1;
 // { kind: 'file'|'url', label, chip, content } — chip is the visible
 // placeholder in the prompt; the content goes into the Attached Context block.
 const attachedContext = [];
+
+// TASK_BRIEF_11: per-session model lock. modelPref = the choice stored under
+// `modelPref:<sessionId>` in localStorage; serverModel = the gateway's
+// reported current model — the send-path fallback when no preference exists.
+let modelPref = null;   // { provider, model } for the active session
+let serverModel = null; // { provider, model } from /api/model/options
+let modelLoading = false; // one options fetch in flight at a time
 
 // ── Storage ──────────────────────────────────────────────────────
 
@@ -1385,6 +1393,141 @@ function updatePrefixMenu() {
   if (cmdPopover?.owner === 'skills' || cmdPopover?.owner === 'at') closeCommandPopover();
 }
 
+// ── Model switcher (TASK_BRIEF_11) ──────────────────────────────
+// A pill in the composer meta row opens the popover over the provider→model
+// list; selecting POSTs the per-session lock and stores a localStorage pref
+// that survives reloads. The popover's owner stays null — the '/' and '@'
+// typing hook must never close or refilter it (CRITIQUE_BRIEF_9 #2).
+
+function modelPrefKey() { return `modelPref:${activeSessionId}`; }
+
+function loadModelPref() {
+  let stored = null;
+  try {
+    stored = JSON.parse(localStorage.getItem(modelPrefKey()) || 'null');
+  } catch {
+    stored = null;
+  }
+  modelPref = stored?.model && stored?.provider ? stored : null;
+}
+
+function storeModelPref() {
+  try {
+    localStorage.setItem(modelPrefKey(), JSON.stringify(modelPref));
+  } catch {
+    // storage unavailable (private mode) — the lock still rides this send
+  }
+}
+
+function updateModelPill() {
+  const name = (modelPref?.model || serverModel?.model || '').trim();
+  els.btnModel.textContent = name || 'model…';
+  els.btnModel.title = name ? `${name} — click to switch` : 'No model yet — click to pick';
+}
+
+function modelItem(provider, m, payload) {
+  const name = String(m?.name || m?.id || '').trim();
+  if (!name) return null;
+  const current = Boolean(payload && m.name === payload.model && provider.slug === payload.provider);
+  const free = /free|cheap/i.test(String(m?.pricing ?? ''));
+  const count = provider.total_models != null ? ` · ${provider.total_models}` : '';
+  return {
+    id: `${provider.slug}/${name}`,
+    label: name,
+    sublabel: free ? 'free' : '',
+    group: `${provider.name}${count}`,
+    meta: { provider: provider.slug, model: name, current },
+  };
+}
+
+function renderModelItem(item, selected) {
+  const mark = item.meta.current ? '● ' : '';
+  const free = item.sublabel ? ` <span class="model-free">${escapeHtml(item.sublabel)}</span>` : '';
+  return `<span class="cmd-label">${mark}${escapeHtml(item.label)}${free}</span>`;
+}
+
+// Fetch fresh on every open (cheap, local gateway). Returns the payload or
+// null; a failed fetch leaves the pill on its 'model?' fallback (spec 7).
+async function fetchModelOptions() {
+  if (modelLoading) return null;
+  modelLoading = true;
+  try {
+    const res = await hermesFetch('/api/model/options');
+    const payload = await readJson(res);
+    if (!res.ok) {
+      els.btnModel.textContent = 'model?';
+      return null;
+    }
+    serverModel = { provider: payload?.provider, model: payload?.model };
+    updateModelPill();
+    return payload;
+  } catch {
+    els.btnModel.textContent = 'model?';
+    return null;
+  } finally {
+    modelLoading = false;
+  }
+}
+
+async function openModelPicker() {
+  if (modelLoading) return; // a fetch is already in flight — no-op click
+  showBanner('');
+  const payload = await fetchModelOptions();
+  if (!payload) {
+    showBanner('Could not load models — gateway unreachable.', 'info');
+    return;
+  }
+  const items = [];
+  for (const p of Array.isArray(payload.providers) ? payload.providers : []) {
+    for (const m of Array.isArray(p?.models) ? p.models : []) {
+      const it = modelItem(p, m, payload);
+      if (it) items.push(it);
+    }
+  }
+  showCommandPopover({
+    items,
+    onSelect: applyModel,
+    filterText: '',
+    placeholder: 'Search models…',
+    emptyMessage: 'No models match',
+    renderItem: renderModelItem,
+  });
+  // cmdPopover.owner stays null: this popover's lifecycle is pill-click only.
+}
+
+async function applyModel(item) {
+  const { provider, model } = item.meta;
+  const prev = modelPref;
+  modelPref = { provider, model };
+  updateModelPill();
+  if (!activeSessionId) {
+    storeModelPref(); // no session yet — the first send carries the lock
+    closeCommandPopover();
+    return;
+  }
+  try {
+    const res = await hermesFetch(
+      `/api/sessions/${encodeURIComponent(activeSessionId)}/model`,
+      { method: 'POST', body: JSON.stringify({ model, provider }) },
+    );
+    if (!res.ok) {
+      modelPref = prev; // lock not applied server-side — revert the pill
+      updateModelPill();
+      const payload = await readJson(res);
+      showBanner(errorMessage(payload, `Model lock failed (${res.status})`));
+      return; // toast, don't close the popover — the user can retry
+    }
+  } catch (err) {
+    modelPref = prev;
+    updateModelPill();
+    showBanner(`Model lock failed: ${err.message || err}`);
+    return;
+  }
+  storeModelPref();
+  updateModelPill();
+  closeCommandPopover();
+}
+
 // ── Live updates (polling) ─────────────────────────────────────
 
 // The gateway has no SSE endpoint for watching arbitrary sessions, so the
@@ -1510,6 +1653,8 @@ async function beginNewChat() {
     setConnection('offline', 'Create failed');
     await saveSettings({ sessionId: '', sessionTitle: 'New chat' });
   }
+  loadModelPref(); // fresh session (or none) → no stored pref, pill falls back
+  updateModelPill();
 }
 
 async function selectSession(id, title) {
@@ -1524,6 +1669,8 @@ async function selectSession(id, title) {
   activeSessionId = id;
   const label = title || id;
   els.sessionTitle.textContent = label;
+  loadModelPref(); // spec 7: restore this session's stored choice
+  updateModelPill();
   await saveSettings({ sessionId: id, sessionTitle: label });
   showBanner('');
   try {
@@ -1645,6 +1792,15 @@ async function sendMessage(text) {
       message: full,
       // When browser use lands: include page context here if settings.browserUse.
     };
+    // TASK_BRIEF_11: every turn carries the per-session model lock — the
+    // stored preference first, else the server-reported current model.
+    // Neither known → omit the lock (gateway default, pre-switcher behavior).
+    const lock = modelPref || serverModel;
+    if (lock?.model && lock?.provider) {
+      body.provider = lock.provider;
+      body.model = lock.model;
+      body.require_model_lock = true;
+    }
 
     const res = await hermesFetch(
       `/api/sessions/${encodeURIComponent(activeSessionId)}/chat/stream`,
@@ -1735,6 +1891,8 @@ els.btnSave.addEventListener('click', async () => {
     setTimeout(() => openSettings(false), 500);
   }
 });
+
+els.btnModel.addEventListener('click', () => openModelPicker());
 
 els.btnTest.addEventListener('click', async () => {
   // Temporarily apply form values without persisting.
@@ -1845,6 +2003,8 @@ async function boot() {
   // can instantly confirm the loaded build (TASK_BRIEF_2 #1).
   const v = chrome?.runtime?.getManifest?.().version || '0.1.0';
   els.versionBadge.textContent = `v${v} · ${BUILD_STRING}`;
+  loadModelPref(); // spec 8: the stored choice survives reloads
+  updateModelPill();
   autoResizePrompt();
   renderMessages();
   startPolling();
@@ -1872,6 +2032,7 @@ async function boot() {
       await beginNewChat();
     }
   }
+  fetchModelOptions(); // fire-and-forget: seed the pill's server default
 }
 
 boot();
