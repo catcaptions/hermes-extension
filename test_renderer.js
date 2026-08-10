@@ -6,6 +6,7 @@
 'use strict';
 
 const assert = require('node:assert');
+const marked = require('./vendor/marked.min.js');
 const { extractTokens, mediaUrl, mediaKind, fingerprint, fixAttributeSentinels } = require('./renderer.js');
 
 let passed = 0;
@@ -370,6 +371,29 @@ t('extractTokens: empty input', () => {
   assert.strictEqual(scrubbed, '');
   assert.deepStrictEqual(math, []);
   assert.deepStrictEqual(media, []);
+});
+
+// ── blank-line structure (TASK_BRIEF_7) ──────────────────────────
+
+t('blankline: hr marker is not merged into a setext heading (TASK_BRIEF_7)', () => {
+  const src = "Here's the draft:\n\n---\n\nDear team,";
+  const { scrubbed } = extractTokens(src);
+  assert.strictEqual(scrubbed, "Here's the draft:\n\n---\n\nDear team,");
+  assert.ok(!/\n[^\n]---\n/.test(scrubbed), 'no run/blank adjacency: --- must stay standalone');
+});
+
+t('blankline: hr marker renders as <hr>, not <h2> (TASK_BRIEF_7, marked)', () => {
+  const { scrubbed } = extractTokens("Here's the draft:\n\n---\n\nDear team,");
+  const html = marked.parse(scrubbed, { gfm: true, breaks: true });
+  assert.ok(html.includes('<hr>'), 'horizontal rule rendered');
+  assert.ok(!html.includes('<h2>'), 'no false setext heading');
+});
+
+t('blankline: paragraphs keep their blank-line separation (no merge)', () => {
+  const { scrubbed } = extractTokens('para one\n\npara two');
+  assert.strictEqual(scrubbed, 'para one\n\npara two');
+  const html = marked.parse(scrubbed, { gfm: true, breaks: true });
+  assert.ok(html.includes('<p>para one</p>\n<p>para two</p>'), 'two separate <p> blocks');
 });
 
 // ── mediaUrl ────────────────────────────────────────────────────

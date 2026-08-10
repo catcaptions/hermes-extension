@@ -190,6 +190,10 @@ function extractTokens(text) {
 
   for (const line of lines) {
     if (line.trim() === '') {
+      // TASK_BRIEF_7: flush the run BEFORE the blank line so each paragraph
+      // keeps its own block and blank lines stay in their original positions
+      // (no hoisting, no `\n---` setext adjacency). Idempotent on empty run.
+      flushRun();
       out.push(line);
       prevBlank = true;
       continue;
