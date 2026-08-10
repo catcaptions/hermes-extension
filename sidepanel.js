@@ -856,6 +856,13 @@ let atUrlBusy = false;    // a bridge /fetch is in flight — no double-confirm
 // is now plain text (Enter sends, space types) until the value leaves '@url:'.
 let atUrlEscaped = false;
 
+// TASK_BRIEF_12: @folder: browse state. folderSession remembers where the
+// '@folder:…' token was so a picked file's chip replaces it (and later chips
+// stack after it); folderPath/folderRootPath track the browser's position.
+let folderSession = null;  // { head, tail }
+let folderPath = '';       // directory currently shown in the browser
+let folderRootPath = '';   // initially confirmed folder — select-all lives here
+
 function cmdDefaultRow(item) {
   const label = escapeHtml(item?.label ?? '');
   const sub = item?.sublabel ? `<span class="cmd-sublabel">${escapeHtml(item.sublabel)}</span>` : '';
@@ -1119,17 +1126,27 @@ async function openSkillsMenu() {
   }
 }
 
-// ── `@` context picker (TASK_BRIEF_10) ───────────────────────────
+// ── `@` context picker (TASK_BRIEF_10 + TASK_BRIEF_12) ───────────
 // '@' expansion is CLI-only on the Hermes gateway, so references are
 // expanded client-side: @url: → bridge /fetch → [fetched: domain] chip +
 // queued content; @file: → OS picker → [File: name] chips (text read
 // client-side, images reuse the paste-to-bridge flow); @image: is a hint
-// row that inserts the literal token for the existing gateway flow.
+// row that inserts the literal token for the existing gateway flow;
+// @folder:/@diff/@staged/@git: (TASK_BRIEF_12) → bridge /list + /git.
+
+// Shared by the OS picker and the folder browser (TASK_BRIEF_12): a file
+// that must never be queued as text.
+const binaryExt = /\.(zip|rar|7z|gz|bz2|xz|tar|exe|msi|dll|so|bin|pdf|docx|xlsx|pptx|iso|jar)$/i;
 
 const AT_ITEMS = [
   { id: '@file:', label: '@file:', sublabel: 'Attach a local file (reads it client-side)', group: 'File', meta: { kind: 'file' } },
   { id: '@url:', label: '@url:', sublabel: 'Attach a web page (via media bridge fetch)', group: 'URL', meta: { kind: 'url' } },
   { id: '@image:', label: '@image:', sublabel: 'Reuse the existing paste-to-bridge image flow', group: 'File', meta: { kind: 'image' } },
+  // TASK_BRIEF_12: folder + git references.
+  { id: '@folder:', label: '@folder:', sublabel: 'Attach a folder listing', group: 'Git/Folder', meta: { kind: 'folder' } },
+  { id: '@diff', label: '@diff', sublabel: 'Attach working-tree diff', group: 'Git', meta: { kind: 'diff' } },
+  { id: '@staged', label: '@staged', sublabel: 'Attach staged diff', group: 'Git', meta: { kind: 'staged' } },
+  { id: '@git:', label: '@git:', sublabel: 'Attach a commit (ref)', group: 'Git', meta: { kind: 'git' } },
 ];
 
 function openAtMenu(term) {
@@ -1165,6 +1182,9 @@ function insertAt(item) {
   const kind = item?.meta?.kind;
   if (kind === 'file') insertAtFile();
   else if (kind === 'url') insertAtUrl();
+  else if (kind === 'folder') insertAtFolder();
+  else if (kind === 'diff' || kind === 'staged') insertGitRow(kind);
+  else if (kind === 'git') insertAtGit();
   else insertAtImage();
 }
 
@@ -1185,6 +1205,48 @@ function insertAtImage() {
   const el = els.prompt;
   const pos = r.prefix.length + 7;
   el.setSelectionRange(pos, pos); // caret after the colon — user types/pastes a path
+  el.focus();
+}
+
+// ── @folder: / @git: / @diff / @staged (TASK_BRIEF_12) ──────────
+
+function insertAtFolder() {
+  closeCommandPopover();
+  const r = atReplacePrefix('@folder:');
+  if (!r) return;
+  const el = els.prompt;
+  const pos = r.prefix.length + 8;
+  el.setSelectionRange(pos, pos); // caret after the colon — user types a path
+  el.focus();
+}
+
+function insertAtGit() {
+  closeCommandPopover();
+  const r = atReplacePrefix('@git:');
+  if (!r) return;
+  const el = els.prompt;
+  const pos = r.prefix.length + 5;
+  el.setSelectionRange(pos, pos); // caret after the colon — user types a ref
+  el.focus();
+}
+
+// @diff / @staged: instant rows — call /git once and swap the typed token
+// for the chip (no browse layer).
+async function insertGitRow(op) {
+  closeCommandPopover();
+  const r = atReplacePrefix(`@${op}`);
+  if (!r) return;
+  const { ok, output, error } = await bridgePost('/git', { op });
+  if (!ok) {
+    showBanner(`Git failed: ${error}`, 'info');
+    return; // the '@diff' token stays for editing
+  }
+  const entry = queueAttached('git', op, output);
+  const el = els.prompt;
+  el.value = r.prefix + entry.chip + r.tail;
+  autoResizePrompt();
+  const pos = el.value.length;
+  el.setSelectionRange(pos, pos);
   el.focus();
 }
 
@@ -1240,9 +1302,6 @@ function handleAtFile(file, done) {
     done?.();
     return;
   }
-  const binaryExt = /\.(zip|rar|7z|gz|bz2|xz|tar|exe|msi|dll|so|bin|pdf|docx|xlsx|pptx|iso|jar)$/i;
-  // CRITIQUE_BRIEF_10 #3: accept text/* and the json/xml (+suffix) families;
-  // the content scan below catches anything that still slips through.
   const textMime = /^(text\/|application\/.*(json|xml)(;|$))/;
   if (binaryExt.test(file.name) || (file.type && !textMime.test(file.type))) {
     showBanner(`Skipped binary file: ${file.name}`, 'info');
@@ -1293,7 +1352,10 @@ function queueAttached(kind, label, content) {
   const id = `${kind}\u0000${label}`;
   const oldIdx = attachedContext.findIndex((i) => `${i.kind}\u0000${i.label}` === id);
   if (oldIdx >= 0) attachedContext.splice(oldIdx, 1);
-  const chipBase = kind === 'url' ? `[fetched: ${urlDomain(label)}]` : `[File: ${label}]`;
+  const chipBase = kind === 'url' ? `[fetched: ${urlDomain(label)}]`
+    : kind === 'git' ? `[Git: ${label}]`
+    : kind === 'folder' ? `[Folder: ${label}]`
+    : `[File: ${label}]`;
   const dup = attachedContext.filter((i) => i.chip === chipBase).length;
   const chip = dup ? `${chipBase} · ${dup + 1}` : chipBase;
   const entry = { kind, label, chip, content };
@@ -1312,19 +1374,25 @@ function urlDomain(u) {
 // Bridge /fetch with an abort cap matching the bridge's 60 s fetch timeout
 // (CRITIQUE_BRIEF_10 #5: the old 25 s aborted while the bridge kept going).
 async function bridgeFetch(url) {
+  return bridgePost('/fetch', { url });
+}
+
+// Generic bridge POST shared by /fetch, /list and /git (TASK_BRIEF_12):
+// returns { ok, ...payload } on 2xx+ok, else { ok:false, error }.
+async function bridgePost(path, body) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), 60000);
   try {
-    const res = await fetch(`${BRIDGE_BASE}/fetch`, {
+    const res = await fetch(`${BRIDGE_BASE}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify(body),
       signal: ac.signal,
     });
     const j = await readJson(res);
     return res.ok && j?.ok
-      ? { ok: true, title: j.title || '', content: j.content || '' }
-      : { ok: false, error: j?.error || `fetch failed (${res.status})` };
+      ? { ok: true, ...j }
+      : { ok: false, error: j?.error || `${path} failed (${res.status})` };
   } catch (err) {
     return { ok: false, error: err?.name === 'AbortError' ? 'timed out' : 'bridge unreachable' };
   } finally {
@@ -1367,6 +1435,190 @@ async function confirmAtUrl() {
   }
 }
 
+// TASK_BRIEF_12: Enter on an unconfirmed '@folder:' — everything after the
+// token is the path (paths may contain spaces). Confirm opens the browse
+// popover over /list's entries; the raw token stays until a file is picked.
+async function confirmAtFolder() {
+  const el = els.prompt;
+  const m = /^@folder:(.*)$/.exec(el.value);
+  if (!m) return; // token gone — nothing to confirm
+  const head = m[0];
+  const path = m[1].trim();
+  if (!path) {
+    showBanner('Type a path after @folder:, then press Enter.', 'info');
+    return;
+  }
+  const { ok, entries, truncated, error } = await bridgePost('/list', { path });
+  if (!ok) {
+    showBanner(`Folder failed: ${error}`, 'info');
+    return; // keep the raw token for editing
+  }
+  folderSession = { head, tail: el.value.slice(head.length) };
+  folderRootPath = path;
+  openFolderBrowse(path, entries, truncated);
+}
+
+function openFolderBrowse(path, entries, truncated) {
+  folderPath = path;
+  const items = [];
+  // 'select all files in this folder (max 20)' lives at the root level only:
+  // it attaches the folder's file LIST as one [Folder: path] block.
+  if (path === folderRootPath) {
+    items.push({
+      id: '@folder:select-all',
+      label: 'Attach all files in this folder (max 20)',
+      sublabel: 'Queues the file list as one folder block',
+      group: '',
+      meta: { kind: 'select-all', path },
+    });
+  }
+  if (truncated) {
+    items.push({
+      id: '@folder:cap',
+      label: 'Listing capped at 200 entries — only the first 200 are shown',
+      sublabel: '',
+      group: '',
+      meta: { kind: 'cap' },
+    });
+  }
+  for (const e of entries || []) {
+    const size = e.size != null ? `${e.size} bytes` : '';
+    items.push({
+      id: `@folder:${e.path}`,
+      label: e.name,
+      sublabel: e.is_dir ? 'folder' : size,
+      group: '',
+      meta: { kind: e.is_dir ? 'dir' : 'file', path: e.path, name: e.name },
+    });
+  }
+  showCommandPopover({
+    items,
+    onSelect: selectFolderEntry,
+    filterText: '',
+    placeholder: 'Filter files…',
+    emptyMessage: 'No matches',
+  });
+  cmdPopover.owner = 'at'; // owned: typing in the prompt closes this layer
+}
+
+async function selectFolderEntry(item) {
+  const kind = item?.meta?.kind;
+  if (kind === 'select-all') {
+    await attachFolderListing(item.meta.path);
+    return;
+  }
+  if (kind === 'cap') return; // notice row — no-op
+  if (kind === 'dir') {
+    const { ok, entries, truncated, error } = await bridgePost('/list', { path: item.meta.path });
+    if (!ok) {
+      showBanner(`Folder failed: ${error}`, 'info');
+      return; // popover keeps the current listing
+    }
+    openFolderBrowse(item.meta.path, entries, truncated);
+    return;
+  }
+  if (kind === 'file') await attachFolderFile(item.meta);
+}
+
+// Swap the '@folder:…' token for the chip; later picks stack after it. The
+// popover stays open so several files can be picked in one round.
+function putFolderChip(chip) {
+  const el = els.prompt;
+  const s = folderSession;
+  if (!s) return;
+  el.value = el.value.startsWith(s.head)
+    ? chip + el.value.slice(s.head.length)
+    : `${el.value} ${chip}`.trim();
+  autoResizePrompt();
+  el.setSelectionRange(el.value.length, el.value.length);
+  el.focus();
+}
+
+// A file picked in the folder browser is read through the bridge (the
+// extension has no filesystem access), then fed through the SAME acceptance
+// pipeline as the OS @file: picker — binary-ext + NUL-byte checks and the
+// 512 KB cap — so both flows share one reader path (TASK_BRIEF_12 spec 2).
+async function attachFolderFile(meta, quiet = false) {
+  const { name, path } = meta;
+  if (binaryExt.test(name)) {
+    if (!quiet) showBanner(`Skipped binary file: ${name}`, 'info');
+    return false;
+  }
+  let res;
+  try {
+    res = await fetch(`${BRIDGE_BASE}/media?path=${encodeURIComponent(path)}`, {
+      signal: AbortSignal.timeout(60000),
+    });
+  } catch {
+    if (!quiet) showBanner(`Could not read ${name} — bridge unreachable.`, 'info');
+    return false;
+  }
+  if (!res.ok) {
+    if (!quiet) showBanner(`Could not read ${name} (${res.status}).`, 'info');
+    return false;
+  }
+  const ctype = (res.headers.get('Content-Type') || '').split(';')[0].trim();
+  const bytes = await res.arrayBuffer();
+  if (ctype.startsWith('image/')) {
+    // Synthetic File → the same image pipeline as paste/@file: (bridge save).
+    ingestImageFile(new File([bytes], name, { type: ctype }));
+    return true;
+  }
+  let content = new TextDecoder('utf-8').decode(bytes);
+  if (content.includes('\u0000')) {
+    if (!quiet) showBanner(`Skipped binary file: ${name}`, 'info');
+    return false;
+  }
+  if (content.length > 512 * 1024) {
+    content = `${content.slice(0, 512 * 1024)}\n… (truncated at 512 KB)`;
+  }
+  const entry = queueAttached('file', name, content);
+  putFolderChip(entry.chip);
+  return true;
+}
+
+// 'Attach all files in this folder (max 20)': one [Folder: path] block whose
+// content is the file list (name — size), capped at 20 files.
+async function attachFolderListing(path) {
+  const { ok, entries, error } = await bridgePost('/list', { path });
+  if (!ok) {
+    showBanner(`Folder failed: ${error}`, 'info');
+    return; // popover stays open
+  }
+  const files = (entries || []).filter((e) => !e.is_dir).slice(0, 20);
+  const lines = files.map((e) => (e.size != null ? `${e.name} — ${e.size} bytes` : e.name));
+  const entry = queueAttached('folder', path, lines.join('\n') || '(empty folder)');
+  putFolderChip(entry.chip);
+  closeCommandPopover();
+  showBanner(`Attached folder listing: ${path} (${files.length} file${files.length === 1 ? '' : 's'})`, 'info');
+}
+
+// TASK_BRIEF_12: Enter/space on an unconfirmed '@git:<ref>' — /git show →
+// [Git: <ref>] chip + stat block. Bridge down / bad ref → toast, token stays.
+async function confirmAtGit() {
+  const el = els.prompt;
+  const m = /^@git:(\S*)/.exec(el.value);
+  if (!m) return; // token gone — nothing to confirm
+  const head = m[0];
+  const ref = m[1];
+  if (!ref) {
+    showBanner('Type a ref after @git:, then press Enter.', 'info');
+    return;
+  }
+  const { ok, output, error } = await bridgePost('/git', { op: 'show', ref });
+  if (!ok) {
+    showBanner(`Git failed: ${error}`, 'info');
+    return; // keep the raw token for editing
+  }
+  if (!el.value.startsWith(head)) return; // edited away while fetching
+  const entry = queueAttached('git', ref, output);
+  el.value = entry.chip + el.value.slice(head.length);
+  autoResizePrompt();
+  const pos = el.value.length;
+  el.setSelectionRange(pos, pos);
+  el.focus();
+}
+
 // Prompt typing (TASK_BRIEF_10 extends the '/' hook): a leading '/' opens
 // the skills menu, a leading '@' the context picker; the two can never be
 // open together. Command tokens in use ('@url:', '@file:', '@image:') close
@@ -1402,7 +1654,8 @@ function updatePrefixMenu() {
     }
     return;
   }
-  if (v.startsWith('@url:') || v.startsWith('@image:') || v.startsWith('@file:')) {
+  if (v.startsWith('@url:') || v.startsWith('@image:') || v.startsWith('@file:') ||
+      v.startsWith('@folder:') || v.startsWith('@git:')) {
     if (cmdPopover?.owner === 'at') closeCommandPopover();
     return;
   }
@@ -1802,12 +2055,14 @@ async function sendMessage(text) {
   }
 
   let full = clean;
-  // TASK_BRIEF_10: confirmed @url:/@file: references expand into an
-  // Attached Context block; chips edited out of the prompt drop their item.
+  // TASK_BRIEF_10/12: confirmed @url:/@file:/@folder:/@git: references expand
+  // into an Attached Context block; chips edited out of the prompt drop
+  // their item (exactly-once — chips were consumed with the prompt below).
   const ctxBlocks = [];
   for (const item of attachedContext) {
     if (!full.includes(item.chip)) continue;
-    ctxBlocks.push(`[${item.kind === 'file' ? 'File' : 'URL'}: ${item.label}]\n${item.content}`);
+    const block = { file: 'File', url: 'URL', git: 'Git', folder: 'Folder' }[item.kind] || item.kind;
+    ctxBlocks.push(`[${block}: ${item.label}]\n${item.content}`);
   }
   if (ctxBlocks.length) full = `${full}${full ? '\n\n' : ''}--- Attached Context ---\n${ctxBlocks.join('\n\n')}`;
   if (mediaLines.length) full = `${full}${full ? '\n' : ''}${mediaLines.join('\n')}`;
@@ -1999,11 +2254,26 @@ els.prompt.addEventListener('keydown', (e) => {
       confirmAtUrl();
       return;
     }
+    if (els.prompt.value.startsWith('@folder:')) {
+      // TASK_BRIEF_12: Enter opens the folder browser (paths may hold spaces).
+      e.preventDefault();
+      confirmAtFolder();
+      return;
+    }
+    if (els.prompt.value.startsWith('@git:')) {
+      // TASK_BRIEF_12: Enter confirms an in-progress @git: ref.
+      e.preventDefault();
+      confirmAtGit();
+      return;
+    }
     e.preventDefault();
     sendMessage(els.prompt.value);
   } else if (e.key === ' ' && !e.shiftKey && els.prompt.value.startsWith('@url:') && !atUrlEscaped) {
     e.preventDefault(); // space ends the URL token
     confirmAtUrl();
+  } else if (e.key === ' ' && !e.shiftKey && els.prompt.value.startsWith('@git:')) {
+    e.preventDefault(); // space ends the ref token
+    confirmAtGit();
   }
 });
 

@@ -11,6 +11,12 @@ Serves: http://127.0.0.1:8643/media?path=<absolute path>
                                      SSRF-guarded: no file://, loopback, or
                                      gateway-port targets; every redirect hop
                                      and the connected address are re-checked)
+        http://127.0.0.1:8643/list  (POST {"path": ...} -> {ok, entries} for a
+                                     directory's children; allowlist roots +
+                                     sensitive-path blocklist, 200-entry cap)
+        http://127.0.0.1:8643/git   (POST {"op": diff|staged|recent|show, ...}
+                                     -> {ok, output}; read-only git ops in the
+                                     repo containing the bridge's cwd, no shell)
 
 Only files under the allowed roots are served: %APPDATA%\\Hermes, the user
 home directory, and /tmp. Everything else gets a 403. /save writes to
@@ -23,6 +29,7 @@ import os
 import re
 import secrets
 import socket
+import subprocess
 import sys
 import tempfile
 import urllib.error
@@ -57,7 +64,18 @@ if os.environ.get('APPDATA'):
     ROOTS.append(os.path.join(os.environ['APPDATA'], 'Hermes'))
 ROOTS.append(os.path.expanduser('~'))
 ROOTS.append('/tmp')
+ROOTS.append(r'C:\projects')  # TASK_BRIEF_12: folder-browsed files live here
 ROOTS = [os.path.normcase(os.path.realpath(r)) for r in ROOTS if os.path.isdir(r)]
+
+# TASK_BRIEF_12: /list sensitive-path blocklist (per official Hermes docs):
+# ~/.ssh, ~/.aws, ~/.config, AppData, any .env, OneDrive, and component names
+# containing secret/credential/token. Applied to the requested path and to
+# every entry in a listing.
+SENSITIVE_PARTS = ('.ssh', '.aws', '.config', 'appdata', 'onedrive')
+SENSITIVE_RE = re.compile(r'(^|[\\/])\.env$|secret|credential|token', re.I)
+LIST_CAP = 200
+MAX_GIT_BYTES = 100 * 1024
+GIT_REF_RE = re.compile(r'^[A-Za-z0-9._/\-^~]+$')
 
 MIME = {
     'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
@@ -203,6 +221,103 @@ def fetch_url(url):
     return None, title, text
 
 
+def _blocked_path(path):
+    """Short error string if path (or any component) hits the sensitive
+    blocklist, else None."""
+    p = os.path.normcase(os.path.realpath(path))
+    if any(part in SENSITIVE_PARTS for part in re.split(r'[\\/]', p)):
+        return 'blocked'
+    if SENSITIVE_RE.search(p):
+        return 'blocked'
+    return None
+
+
+def list_dir(path):
+    """(error, entries, truncated) for the immediate children of path.
+    Blocks '..' components, paths resolving outside the allowlist roots, and
+    sensitive paths; caps the listing at LIST_CAP entries (dirs first, then
+    name)."""
+    p = str(path or '').strip().strip('"')
+    if not p or any(part == '..' for part in re.split(r'[\\/]', p)):
+        return 'blocked', None, False
+    try:
+        rp = os.path.realpath(p)
+    except OSError:
+        return 'blocked', None, False
+    rn = os.path.normcase(rp)
+    if not any(rn == root or rn.startswith(root + os.sep) for root in ROOTS):
+        return 'blocked', None, False
+    if _blocked_path(rp):
+        return 'blocked', None, False
+    if not os.path.isdir(rp):
+        return 'not a directory', None, False
+    try:
+        names = os.listdir(rp)
+    except OSError:
+        return 'read failed', None, False
+    entries = []
+    for n in sorted(names, key=str.lower):
+        full = os.path.join(rp, n)
+        if _blocked_path(full):
+            continue
+        try:
+            is_dir = os.path.isdir(full)
+            size = None if is_dir else os.path.getsize(full)
+        except OSError:
+            continue
+        entries.append({'name': n, 'path': full, 'is_dir': is_dir, 'size': size})
+    entries.sort(key=lambda e: (not e['is_dir'], e['name'].lower()))
+    truncated = len(entries) > LIST_CAP
+    return None, entries[:LIST_CAP], truncated
+
+
+def _repo_root():
+    """The git repo containing the bridge's cwd (walking up), or None."""
+    d = os.getcwd()
+    while True:
+        if os.path.isdir(os.path.join(d, '.git')):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+    return None
+
+
+def run_git(op, n=None, ref=None):
+    """(error, output) for a read-only git op in the repo containing the
+    bridge's cwd. Arg lists only — never shell=True. Refs are validated
+    against a strict allowlist before they reach git."""
+    if op not in ('diff', 'staged', 'recent', 'show'):
+        return 'unknown op', ''
+    root = _repo_root()
+    if not root:
+        return 'not a git repo', ''
+    if op == 'diff':
+        args = ['diff']
+    elif op == 'staged':
+        args = ['diff', '--staged']
+    elif op == 'recent':
+        try:
+            count = int(n or 10)
+        except (TypeError, ValueError):
+            count = 10
+        args = ['log', '--oneline', '-n', str(max(1, min(count, 100)))]
+    else:
+        ref = str(ref or '').strip()
+        if not ref or not GIT_REF_RE.match(ref):
+            return 'blocked ref', ''
+        args = ['show', '--stat', '--format=%h %s', ref]
+    try:
+        proc = subprocess.run(['git', *args], cwd=root, capture_output=True,
+                              text=True, errors='replace', timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return 'git failed', ''
+    if proc.returncode != 0:
+        return (proc.stderr or 'git failed').strip()[:400], ''
+    return None, proc.stdout[:MAX_GIT_BYTES]
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -233,7 +348,53 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._handle_save()
         if parsed.path == '/fetch':
             return self._handle_fetch()
+        if parsed.path == '/list':
+            return self._handle_list()
+        if parsed.path == '/git':
+            return self._handle_git()
         return self._send(404, b'not found')
+
+    def _read_json_body(self, max_bytes):
+        """Parsed JSON body, or None when empty/too large/not JSON."""
+        try:
+            size = int(self.headers.get('Content-Length') or 0)
+        except ValueError:
+            size = 0
+        if size <= 0 or size > max_bytes:
+            return None
+        try:
+            return json.loads(self.rfile.read(size))
+        except (ValueError, UnicodeDecodeError):
+            return None
+
+    def _send_json(self, obj):
+        resp = json.dumps(obj).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(resp)))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(resp)
+
+    def _handle_list(self):
+        payload = self._read_json_body(4096)
+        if payload is None:
+            return self._send(400, b'bad json')
+        error, entries, truncated = list_dir(str(payload.get('path') or ''))
+        if error:
+            return self._send_json({'ok': False, 'error': error})
+        return self._send_json({'ok': True, 'entries': entries, 'truncated': truncated})
+
+    def _handle_git(self):
+        payload = self._read_json_body(4096)
+        if payload is None:
+            return self._send(400, b'bad json')
+        op = str(payload.get('op') or '')
+        kw = {k: payload[k] for k in ('n', 'ref') if k in payload}
+        error, output = run_git(op, **kw)
+        if error:
+            return self._send_json({'ok': False, 'error': error})
+        return self._send_json({'ok': True, 'output': output})
 
     def _handle_save(self):
         ctype = self.headers.get('Content-Type', '').split(';')[0].strip().lower()
