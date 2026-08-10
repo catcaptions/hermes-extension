@@ -9,12 +9,14 @@ Serves: http://127.0.0.1:8643/media?path=<absolute path>
         http://127.0.0.1:8643/save  (POST raw image bytes -> temp file, returns path)
         http://127.0.0.1:8643/fetch (POST {"url": ...} -> {ok, title, content};
                                      SSRF-guarded: no file://, loopback, or
-                                     gateway-port targets)
+                                     gateway-port targets; every redirect hop
+                                     and the connected address are re-checked)
 
 Only files under the allowed roots are served: %APPDATA%\\Hermes, the user
 home directory, and /tmp. Everything else gets a 403. /save writes to
 %TEMP%\\hm-media (inside the home root on Windows) and needs no extra access.
 """
+import http.client
 import http.server
 import json
 import os
@@ -69,35 +71,115 @@ MIME = {
 }
 
 
-def fetch_url(url):
-    """Fetch a public http(s) page as text. Returns (error, title, content);
-    error is None on success. Refuses file://, loopback targets (by string
-    and by resolved address), and URLs pointed at the gateway ports."""
+class _Blocked(Exception):
+    """A fetch target (or redirect hop / connected peer) failed the guards."""
+
+
+def _norm_addr(addr):
+    """IPv4-mapped IPv6 ('::ffff:127.0.0.1') -> the embedded IPv4 address."""
+    return addr[7:] if addr.startswith('::ffff:') else addr
+
+
+def _guard_addr(addr):
+    """None if addr is a safe public address, else a short error string.
+    Blocks loopback (incl. IPv4-mapped IPv6) and the link-local block that
+    hosts cloud metadata (169.254.169.254)."""
+    a = _norm_addr(addr)
+    if a.startswith('127.') or a == '::1':
+        return 'blocked'
+    if a.startswith('169.254.'):
+        return 'blocked'
+    return None
+
+
+def _guard_url(url):
+    """None if the URL may be fetched, else a short error string. Re-run on
+    every redirect hop — the initial check alone is bypassable via a 302."""
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ('http', 'https'):
-        return 'unsupported scheme', '', ''
-    host = (parsed.hostname or '').lower()
-    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
-    if host in BLOCKED_HOSTS or host.startswith('127.'):
-        return 'blocked', '', ''
+        return 'unsupported scheme'
+    try:
+        host = (parsed.hostname or '').lower()
+        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    except ValueError:
+        return 'unsupported scheme'  # malformed port
+    if host in BLOCKED_HOSTS or _guard_addr(host):
+        return 'blocked'
     if port in BLOCKED_PORTS:
-        return 'blocked', '', ''
+        return 'blocked'
     try:
         addrs = {a[4][0] for a in socket.getaddrinfo(host, port)}
     except OSError:
-        return 'dns failed', '', ''
-    if any(a.startswith('127.') or a == '::1' for a in addrs):
-        return 'blocked', '', ''
+        return 'dns failed'
+    if any(_guard_addr(a) for a in addrs):
+        return 'blocked'
+    return None
+
+
+class _GuardRedirectHandler(urllib.request.HTTPRedirectHandler):
+    # urllib already caps redirect chains (max_redirections, default 10);
+    # this override re-runs the SSRF guards on every hop before following.
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        error = _guard_url(newurl)
+        if error:
+            raise _Blocked(error)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+class _GuardHTTPConnection(http.client.HTTPConnection):
+    def connect(self):
+        super().connect()
+        self._guard_peer()
+
+    def _guard_peer(self):
+        # Re-validate the address actually connected: closes the DNS-rebinding
+        # (TOCTOU) gap — whatever peer the OS resolved to must be public.
+        error = _guard_addr(self.sock.getpeername()[0])
+        if error:
+            self.sock.close()
+            raise _Blocked(error)
+
+
+class _GuardHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self):
+        super().connect()
+        self._guard_peer()  # inherited: checked before the TLS handshake
+
+
+class _GuardHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_GuardHTTPConnection, req)
+
+
+class _GuardHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_GuardHTTPSConnection, req,
+                            context=self._context,
+                            check_hostname=self._check_hostname)
+
+
+def fetch_url(url):
+    """Fetch a public http(s) page as text. Returns (error, title, content);
+    error is None on success. Refuses file://, loopback/link-local targets
+    (by string, by resolved address, and by connected peer), URLs pointed at
+    the gateway ports, and any redirect hop that fails the same checks."""
+    error = _guard_url(url)
+    if error:
+        return error, '', ''
     req = urllib.request.Request(url, headers={
         'User-Agent': FETCH_UA,
         'Accept': 'text/html,text/markdown,text/plain,application/json,*/*',
     })
+    opener = urllib.request.build_opener(
+        _GuardRedirectHandler, _GuardHTTPHandler, _GuardHTTPSHandler)
     try:
-        with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as resp:
+        with opener.open(req, timeout=FETCH_TIMEOUT) as resp:
             body = resp.read(MAX_FETCH_BYTES + 1)
             if len(body) > MAX_FETCH_BYTES:
                 return 'content too large (max 1 MB)', '', ''
             text = body.decode('utf-8', errors='replace')
+    except _Blocked:
+        return 'blocked', '', ''
     except urllib.error.HTTPError as err:
         return 'http error %s' % err.code, '', ''
     except (urllib.error.URLError, OSError, ValueError):

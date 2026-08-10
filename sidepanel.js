@@ -839,8 +839,11 @@ let atDismissed = null;    // '@…' value dismissed via Escape/Tab (@ picker)
 // CRITIQUE_BRIEF_9 #3: at most one /v1/skills fetch in flight.
 let skillsFetching = false;
 // TASK_BRIEF_10: mid-flow state for the @ picker.
-let atFileSession = null; // { chips, tail } while a @file: picker round is open
+let atFileSession = null; // { chips, prefix, tail } while a @file: picker round is open
 let atUrlBusy = false;    // a bridge /fetch is in flight — no double-confirm
+// CRITIQUE_BRIEF_10 #8: user pressed Esc on an unconfirmed '@url:' — the token
+// is now plain text (Enter sends, space types) until the value leaves '@url:'.
+let atUrlEscaped = false;
 
 function cmdDefaultRow(item) {
   const label = escapeHtml(item?.label ?? '');
@@ -1129,17 +1132,22 @@ function openAtMenu(term) {
   cmdPopover.owner = 'at'; // CRITIQUE_BRIEF_9 #2: who owns this open
 }
 
-// Swap the leading '@…' (up to the caret) for a command token; returns the
-// untouched tail so callers can rebuild the prompt.
+// Swap the nearest '@…' before the caret for a command token; returns
+// { prefix, tail } so callers can rebuild the prompt, or null when there is
+// no '@' before the caret (caret at 0, selection from 0, chips already in
+// front of the token). CRITIQUE_BRIEF_10 #2: callers MUST no-op on null —
+// the prompt is never touched on that path.
 function atReplacePrefix(token) {
   const el = els.prompt;
   const end = typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length;
   const head = el.value.slice(0, end);
-  if (!head.startsWith('@')) return null;
+  const at = head.lastIndexOf('@');
+  if (at === -1) return null;
   const tail = el.value.slice(end);
-  el.value = token + tail;
+  const prefix = head.slice(0, at);
+  el.value = prefix + token + tail;
   autoResizePrompt();
-  return tail;
+  return { prefix, tail };
 }
 
 function insertAt(item) {
@@ -1151,24 +1159,31 @@ function insertAt(item) {
 
 function insertAtUrl() {
   closeCommandPopover();
-  atReplacePrefix('@url:');
+  const r = atReplacePrefix('@url:');
+  if (!r) return; // CRITIQUE_BRIEF_10 #12: no token before the caret — no caret jump
   const el = els.prompt;
-  el.setSelectionRange(5, 5); // caret right after the colon — user pastes a URL
+  const pos = r.prefix.length + 5;
+  el.setSelectionRange(pos, pos); // caret right after the colon — user pastes a URL
   el.focus();
 }
 
 function insertAtImage() {
   closeCommandPopover();
-  atReplacePrefix('@image:');
+  const r = atReplacePrefix('@image:');
+  if (!r) return; // CRITIQUE_BRIEF_10 #12: no token before the caret — no caret jump
   const el = els.prompt;
-  el.setSelectionRange(7, 7); // caret after the colon — user types/pastes a path
+  const pos = r.prefix.length + 7;
+  el.setSelectionRange(pos, pos); // caret after the colon — user types/pastes a path
   el.focus();
 }
 
 function insertAtFile() {
   closeCommandPopover();
-  const tail = atReplacePrefix('@file:');
-  atFileSession = { chips: [], tail: tail || '' };
+  const r = atReplacePrefix('@file:');
+  // CRITIQUE_BRIEF_10 #2: null (caret at 0 / chips in front of the token) must
+  // never start a session — the old path wiped the whole prompt on cancel.
+  if (!r) return;
+  atFileSession = { chips: [], prefix: r.prefix, tail: r.tail };
   pickAtFiles();
 }
 
@@ -1181,12 +1196,13 @@ function pickAtFiles() {
     for (const f of [...(input.files || [])]) handleAtFile(f);
     input.remove();
     renderAtFilePrompt();
+    atFileSession = null; // CRITIQUE_BRIEF_10 #10: round over — no stale session
   });
   input.addEventListener('cancel', () => {
-    // No files chosen — drop the transient '@file:' token, keep the tail.
+    // No files chosen — drop the transient '@file:' token, keep the rest.
     const s = atFileSession;
     atFileSession = null;
-    if (s) els.prompt.value = s.tail;
+    if (s) els.prompt.value = s.prefix + s.tail;
     input.remove();
     autoResizePrompt();
   });
@@ -1200,19 +1216,27 @@ function handleAtFile(file) {
     return;
   }
   const binaryExt = /\.(zip|rar|7z|gz|bz2|xz|tar|exe|msi|dll|so|bin|pdf|docx|xlsx|pptx|iso|jar)$/i;
-  if (binaryExt.test(file.name) || (file.type && !file.type.startsWith('text/'))) {
+  // CRITIQUE_BRIEF_10 #3: accept text/* and the json/xml (+suffix) families;
+  // the content scan below catches anything that still slips through.
+  const textMime = /^(text\/|application\/.*(json|xml)(;|$))/;
+  if (binaryExt.test(file.name) || (file.type && !textMime.test(file.type))) {
     showBanner(`Skipped binary file: ${file.name}`, 'info');
     return;
   }
   const reader = new FileReader();
   reader.onload = () => {
     let content = String(reader.result || '');
+    // CRITIQUE_BRIEF_10 #3: content-based binary detection — null bytes in
+    // binary data land as U+0000 (readAsText replaces invalid UTF-8).
+    if (content.includes('\u0000')) {
+      showBanner(`Skipped binary file: ${file.name}`, 'info');
+      return;
+    }
     if (content.length > 512 * 1024) {
       content = `${content.slice(0, 512 * 1024)}\n… (truncated at 512 KB)`;
     }
-    const chip = `[File: ${file.name}]`;
-    attachedContext.push({ kind: 'file', label: file.name, chip, content });
-    atFileSession?.chips.push(chip);
+    const entry = queueAttached('file', file.name, content);
+    atFileSession?.chips.push(entry.chip);
     renderAtFilePrompt();
   };
   reader.onerror = () => showBanner(`Could not read ${file.name}`, 'info');
@@ -1224,10 +1248,26 @@ function renderAtFilePrompt() {
   if (!s) return;
   const el = els.prompt;
   const chips = s.chips.join(' ');
-  el.value = chips + (s.tail ? `${chips ? ' ' : ''}${s.tail}` : '');
+  el.value = s.prefix + chips + (s.tail ? `${chips ? ' ' : ''}${s.tail}` : '');
   autoResizePrompt();
   el.focus();
   el.setSelectionRange(el.value.length, el.value.length);
+}
+
+// CRITIQUE_BRIEF_10 #11: one queued entry per identity (re-adding the same
+// item replaces the old one), and each entry gets a unique chip so deleting
+// one chip can never expand another entry's content (e.g. two same-domain
+// URLs share the '[fetched: …]' chip text otherwise).
+function queueAttached(kind, label, content) {
+  const id = `${kind}\u0000${label}`;
+  const oldIdx = attachedContext.findIndex((i) => `${i.kind}\u0000${i.label}` === id);
+  if (oldIdx >= 0) attachedContext.splice(oldIdx, 1);
+  const chipBase = kind === 'url' ? `[fetched: ${urlDomain(label)}]` : `[File: ${label}]`;
+  const dup = attachedContext.filter((i) => i.chip === chipBase).length;
+  const chip = dup ? `${chipBase} · ${dup + 1}` : chipBase;
+  const entry = { kind, label, chip, content };
+  attachedContext.push(entry);
+  return entry;
 }
 
 function urlDomain(u) {
@@ -1238,10 +1278,11 @@ function urlDomain(u) {
   }
 }
 
-// Bridge /fetch with a short abort cap; never throws.
+// Bridge /fetch with an abort cap matching the bridge's 60 s fetch timeout
+// (CRITIQUE_BRIEF_10 #5: the old 25 s aborted while the bridge kept going).
 async function bridgeFetch(url) {
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 25000);
+  const timer = setTimeout(() => ac.abort(), 60000);
   try {
     const res = await fetch(`${BRIDGE_BASE}/fetch`, {
       method: 'POST',
@@ -1261,14 +1302,15 @@ async function bridgeFetch(url) {
 }
 
 // Enter/space while an unconfirmed '@url:' prefix is present: fetch the URL
-// token (up to whitespace), swap it for a chip, queue the content.
+// token (up to whitespace, trailing punctuation stripped), swap it for a
+// chip, queue the content.
 async function confirmAtUrl() {
   if (atUrlBusy) return;
   const el = els.prompt;
   const m = /^@url:(\S*)/.exec(el.value);
   if (!m) return; // token gone — nothing to confirm
   const head = m[0];
-  const url = m[1];
+  const url = m[1].replace(/[.,;:!?]+$/, ''); // CRITIQUE_BRIEF_10 #6: no trailing punctuation
   if (!url) {
     showBanner('Paste a URL after @url:, then press Enter.', 'info');
     return;
@@ -1280,10 +1322,9 @@ async function confirmAtUrl() {
     showBanner(`Attach failed: ${error}`, 'info');
     return; // the raw token stays — the user can edit or delete it
   }
-  const chip = `[fetched: ${urlDomain(url)}]`;
   if (el.value.startsWith(head)) {
-    el.value = chip + el.value.slice(head.length);
-    attachedContext.push({ kind: 'url', label: url, chip, content: content || title || '' });
+    const entry = queueAttached('url', url, content || title || '');
+    el.value = entry.chip + el.value.slice(head.length);
     autoResizePrompt();
     const pos = el.value.length;
     el.setSelectionRange(pos, pos);
@@ -1299,6 +1340,7 @@ async function confirmAtUrl() {
 // here — a foreign popover (e.g. a future model picker) is never touched.
 function updatePrefixMenu() {
   const v = els.prompt.value;
+  if (!v.startsWith('@url:')) atUrlEscaped = false; // CRITIQUE_BRIEF_10 #8
   if (slashDismissed) {
     if (v.startsWith(slashDismissed)) return;
     slashDismissed = null; // prefix changed — dismissal expires
@@ -1538,6 +1580,7 @@ async function sendMessage(text) {
   slashInserted = null; // CRITIQUE_BRIEF_9 #8: fresh prompt, fresh suppression
   slashDismissed = null;
   atDismissed = null;
+  atUrlEscaped = false; // CRITIQUE_BRIEF_10 #8: raw-send mode ends with the prompt
   autoResizePrompt();
 
   // Ensure a session exists.
@@ -1742,8 +1785,14 @@ els.prompt.addEventListener('keydown', (e) => {
     cmdHandleKey(e);
     return;
   }
-  if (e.key === 'Enter' && !e.shiftKey) {
-    if (els.prompt.value.startsWith('@url:')) {
+  if (e.key === 'Escape' && els.prompt.value.startsWith('@url:') && !atUrlEscaped) {
+    // CRITIQUE_BRIEF_10 #8: leave confirm mode — the token is now plain text
+    // (Enter sends raw, space inserts a literal space) until it stops
+    // starting with '@url:'.
+    e.preventDefault();
+    atUrlEscaped = true;
+  } else if (e.key === 'Enter' && !e.shiftKey) {
+    if (els.prompt.value.startsWith('@url:') && !atUrlEscaped) {
       // TASK_BRIEF_10: Enter confirms an in-progress @url: instead of sending.
       e.preventDefault();
       confirmAtUrl();
@@ -1751,7 +1800,7 @@ els.prompt.addEventListener('keydown', (e) => {
     }
     e.preventDefault();
     sendMessage(els.prompt.value);
-  } else if (e.key === ' ' && !e.shiftKey && els.prompt.value.startsWith('@url:')) {
+  } else if (e.key === ' ' && !e.shiftKey && els.prompt.value.startsWith('@url:') && !atUrlEscaped) {
     e.preventDefault(); // space ends the URL token
     confirmAtUrl();
   }
