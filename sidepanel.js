@@ -99,6 +99,11 @@ let bridgeUp = false;        // local media bridge reachable at boot (probe)
 const attachments = [];
 let attachId = 1;
 
+// TASK_BRIEF_10: confirmed @url:/@file: references awaiting send, each
+// { kind: 'file'|'url', label, chip, content } — chip is the visible
+// placeholder in the prompt; the content goes into the Attached Context block.
+const attachedContext = [];
+
 // ── Storage ──────────────────────────────────────────────────────
 
 async function loadSettings() {
@@ -825,6 +830,9 @@ let cmdPopover = null; // { el, listEl, items, onSelect, renderItem, filter, vis
 // TASK_BRIEF_9: '/name' last inserted by the skills menu — while the prompt
 // still starts with it, a fresh '/' hasn't been typed, so the menu stays closed.
 let slashInserted = null;
+// TASK_BRIEF_10: mid-flow state for the @ picker.
+let atFileSession = null; // { chips, tail } while a @file: picker round is open
+let atUrlBusy = false;    // a bridge /fetch is in flight — no double-confirm
 
 function cmdDefaultRow(item) {
   const label = escapeHtml(item?.label ?? '');
@@ -1084,6 +1092,218 @@ function updateSlashMenu() {
   }
 }
 
+// ── `@` context picker (TASK_BRIEF_10) ───────────────────────────
+// '@' expansion is CLI-only on the Hermes gateway, so references are
+// expanded client-side: @url: → bridge /fetch → [fetched: domain] chip +
+// queued content; @file: → OS picker → [File: name] chips (text read
+// client-side, images reuse the paste-to-bridge flow); @image: is a hint
+// row that inserts the literal token for the existing gateway flow.
+
+const AT_ITEMS = [
+  { id: '@file:', label: '@file:', sublabel: 'Attach a local file (reads it client-side)', group: 'File', meta: { kind: 'file' } },
+  { id: '@url:', label: '@url:', sublabel: 'Attach a web page (via media bridge fetch)', group: 'URL', meta: { kind: 'url' } },
+  { id: '@image:', label: '@image:', sublabel: 'Reuse the existing paste-to-bridge image flow', group: 'File', meta: { kind: 'image' } },
+];
+
+function openAtMenu(term) {
+  showCommandPopover({
+    items: AT_ITEMS,
+    onSelect: insertAt,
+    filterText: term || '',
+    placeholder: 'Filter references…',
+    emptyMessage: 'No matches',
+  });
+}
+
+// Swap the leading '@…' (up to the caret) for a command token; returns the
+// untouched tail so callers can rebuild the prompt.
+function atReplacePrefix(token) {
+  const el = els.prompt;
+  const end = typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length;
+  const head = el.value.slice(0, end);
+  if (!head.startsWith('@')) return null;
+  const tail = el.value.slice(end);
+  el.value = token + tail;
+  autoResizePrompt();
+  return tail;
+}
+
+function insertAt(item) {
+  const kind = item?.meta?.kind;
+  if (kind === 'file') insertAtFile();
+  else if (kind === 'url') insertAtUrl();
+  else insertAtImage();
+}
+
+function insertAtUrl() {
+  closeCommandPopover();
+  atReplacePrefix('@url:');
+  const el = els.prompt;
+  el.setSelectionRange(5, 5); // caret right after the colon — user pastes a URL
+  el.focus();
+}
+
+function insertAtImage() {
+  closeCommandPopover();
+  atReplacePrefix('@image:');
+  const el = els.prompt;
+  el.setSelectionRange(7, 7); // caret after the colon — user types/pastes a path
+  el.focus();
+}
+
+function insertAtFile() {
+  closeCommandPopover();
+  const tail = atReplacePrefix('@file:');
+  atFileSession = { chips: [], tail: tail || '' };
+  pickAtFiles();
+}
+
+function pickAtFiles() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.multiple = true;
+  input.accept = '*/*';
+  input.addEventListener('change', () => {
+    for (const f of [...(input.files || [])]) handleAtFile(f);
+    input.remove();
+    renderAtFilePrompt();
+  });
+  input.addEventListener('cancel', () => {
+    // No files chosen — drop the transient '@file:' token, keep the tail.
+    const s = atFileSession;
+    atFileSession = null;
+    if (s) els.prompt.value = s.tail;
+    input.remove();
+    autoResizePrompt();
+  });
+  input.click();
+}
+
+function handleAtFile(file) {
+  if (!file) return;
+  if (file.type.startsWith('image/')) {
+    ingestImageFile(file); // existing paste-to-bridge flow, no prompt token
+    return;
+  }
+  const binaryExt = /\.(zip|rar|7z|gz|bz2|xz|tar|exe|msi|dll|so|bin|pdf|docx|xlsx|pptx|iso|jar)$/i;
+  if (binaryExt.test(file.name) || (file.type && !file.type.startsWith('text/'))) {
+    showBanner(`Skipped binary file: ${file.name}`, 'info');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    let content = String(reader.result || '');
+    if (content.length > 512 * 1024) {
+      content = `${content.slice(0, 512 * 1024)}\n… (truncated at 512 KB)`;
+    }
+    const chip = `[File: ${file.name}]`;
+    attachedContext.push({ kind: 'file', label: file.name, chip, content });
+    atFileSession?.chips.push(chip);
+    renderAtFilePrompt();
+  };
+  reader.onerror = () => showBanner(`Could not read ${file.name}`, 'info');
+  reader.readAsText(file);
+}
+
+function renderAtFilePrompt() {
+  const s = atFileSession;
+  if (!s) return;
+  const el = els.prompt;
+  const chips = s.chips.join(' ');
+  el.value = chips + (s.tail ? `${chips ? ' ' : ''}${s.tail}` : '');
+  autoResizePrompt();
+  el.focus();
+  el.setSelectionRange(el.value.length, el.value.length);
+}
+
+function urlDomain(u) {
+  try {
+    return new URL(u).hostname.replace(/^www\./, '') || u;
+  } catch {
+    return u;
+  }
+}
+
+// Bridge /fetch with a short abort cap; never throws.
+async function bridgeFetch(url) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 25000);
+  try {
+    const res = await fetch(`${BRIDGE_BASE}/fetch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+      signal: ac.signal,
+    });
+    const j = await readJson(res);
+    return res.ok && j?.ok
+      ? { ok: true, title: j.title || '', content: j.content || '' }
+      : { ok: false, error: j?.error || `fetch failed (${res.status})` };
+  } catch (err) {
+    return { ok: false, error: err?.name === 'AbortError' ? 'timed out' : 'bridge unreachable' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Enter/space while an unconfirmed '@url:' prefix is present: fetch the URL
+// token (up to whitespace), swap it for a chip, queue the content.
+async function confirmAtUrl() {
+  if (atUrlBusy) return;
+  const el = els.prompt;
+  const m = /^@url:(\S*)/.exec(el.value);
+  if (!m) return; // token gone — nothing to confirm
+  const head = m[0];
+  const url = m[1];
+  if (!url) {
+    showBanner('Paste a URL after @url:, then press Enter.', 'info');
+    return;
+  }
+  atUrlBusy = true;
+  const { ok, title, content, error } = await bridgeFetch(url);
+  atUrlBusy = false;
+  if (!ok) {
+    showBanner(`Attach failed: ${error}`, 'info');
+    return; // the raw token stays — the user can edit or delete it
+  }
+  const chip = `[fetched: ${urlDomain(url)}]`;
+  if (el.value.startsWith(head)) {
+    el.value = chip + el.value.slice(head.length);
+    attachedContext.push({ kind: 'url', label: url, chip, content: content || title || '' });
+    autoResizePrompt();
+    const pos = el.value.length;
+    el.setSelectionRange(pos, pos);
+    el.focus();
+  }
+}
+
+// Prompt typing (TASK_BRIEF_10 extends the '/' hook): a leading '/' opens
+// the skills menu, a leading '@' the context picker; the two can never be
+// open together. Command tokens in use ('@url:', '@file:', '@image:') close
+// the picker so the URL/path can be typed freely.
+function updatePrefixMenu() {
+  const v = els.prompt.value;
+  if (slashInserted) {
+    if (v.startsWith(slashInserted)) return;
+    slashInserted = null; // token gone — normal rules resume
+  }
+  if (v.startsWith('/')) {
+    if (isCommandPopoverOpen()) setCommandPopoverFilter(v.slice(1));
+    else openSkillsMenu(v.slice(1));
+    return;
+  }
+  if (v.startsWith('@url:') || v.startsWith('@image:') || v.startsWith('@file:')) {
+    if (isCommandPopoverOpen()) closeCommandPopover();
+    return;
+  }
+  if (v.startsWith('@')) {
+    if (isCommandPopoverOpen()) setCommandPopoverFilter(v.slice(1));
+    else openAtMenu(v.slice(1));
+    return;
+  }
+  if (isCommandPopoverOpen()) closeCommandPopover();
+}
+
 // ── Live updates (polling) ─────────────────────────────────────
 
 // The gateway has no SSE endpoint for watching arbitrary sessions, so the
@@ -1310,8 +1530,18 @@ async function sendMessage(text) {
     }
   }
 
-  const full = mediaLines.length ? `${clean}${clean ? '\n' : ''}${mediaLines.join('\n')}` : clean;
+  let full = clean;
+  // TASK_BRIEF_10: confirmed @url:/@file: references expand into an
+  // Attached Context block; chips edited out of the prompt drop their item.
+  const ctxBlocks = [];
+  for (const item of attachedContext) {
+    if (!full.includes(item.chip)) continue;
+    ctxBlocks.push(`[${item.kind === 'file' ? 'File' : 'URL'}: ${item.label}]\n${item.content}`);
+  }
+  if (ctxBlocks.length) full = `${full}${full ? '\n\n' : ''}--- Attached Context ---\n${ctxBlocks.join('\n\n')}`;
+  if (mediaLines.length) full = `${full}${full ? '\n' : ''}${mediaLines.join('\n')}`;
   attachments.length = 0;
+  attachedContext.length = 0; // chips were consumed with the prompt — no dup on retry
   renderChips();
 
   const userMsg = { role: 'user', content: full };
@@ -1459,9 +1689,8 @@ els.btnSend.addEventListener('click', (e) => {
 
 els.prompt.addEventListener('input', autoResizePrompt);
 els.prompt.addEventListener('input', () => {
-  // TASK_BRIEF_9: '/' menu open/sync/close; Phase 0 hook becomes the
-  // caller-owned input listener the popover API anticipates.
-  updateSlashMenu();
+  // TASK_BRIEF_9/10: '/' + '@' menus open/sync/close from the popover hook.
+  updatePrefixMenu();
 });
 els.prompt.addEventListener('keydown', (e) => {
   if (isCommandPopoverOpen()) {
@@ -1472,8 +1701,17 @@ els.prompt.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === 'Enter' && !e.shiftKey) {
+    if (els.prompt.value.startsWith('@url:')) {
+      // TASK_BRIEF_10: Enter confirms an in-progress @url: instead of sending.
+      e.preventDefault();
+      confirmAtUrl();
+      return;
+    }
     e.preventDefault();
     sendMessage(els.prompt.value);
+  } else if (e.key === ' ' && !e.shiftKey && els.prompt.value.startsWith('@url:')) {
+    e.preventDefault(); // space ends the URL token
+    confirmAtUrl();
   }
 });
 
