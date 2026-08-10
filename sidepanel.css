@@ -678,6 +678,78 @@ code {
   50% { opacity: 0.4; }
 }
 
+/* ── Command popover (TASK_BRIEF_8) ─────────────────── */
+
+#cmd-popover {
+  position: absolute;
+  bottom: 100%;
+  width: min(340px, calc(100vw - 24px));
+  max-height: 260px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14);
+  z-index: 110;
+  overflow: hidden;
+}
+.cmd-filter {
+  flex-shrink: 0;
+  margin: 8px 8px 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--bg);
+  outline: none;
+}
+.cmd-filter:focus { border-color: #bbb; box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.04); }
+.cmd-list {
+  flex: 1;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px 6px 6px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.cmd-group {
+  padding: 8px 10px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  user-select: none;
+}
+.cmd-item { border-radius: 8px; }
+.cmd-item button {
+  width: 100%;
+  display: block;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.cmd-item.cmd-hl, .cmd-item.cmd-hl button { background: var(--bg-soft); }
+.cmd-item .cmd-label { display: block; font-weight: 500; }
+.cmd-item .cmd-sublabel { display: block; font-size: 11px; color: var(--text-muted); }
+.cmd-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 13px;
+}
+
 /* Hide main chrome when settings open */
 body.settings-open .header,
 body.settings-open .messages,

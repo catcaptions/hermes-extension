@@ -814,6 +814,203 @@ function updateRunningIndicator() {
   }
 }
 
+// ── Command popover (TASK_BRIEF_8) ───────────────────────────────
+// Generic anchored dropdown — foundation for the `/` skills menu, `@`
+// context picker, and model switcher. One popover open at a time; the
+// caller owns item semantics and closes/replaces the popover from onSelect.
+
+const CMD_POPOVER_MAX_HEIGHT = 260;
+
+let cmdPopover = null; // { el, listEl, filterEl, items, onSelect, renderItem, filter, visible, highlight, emptyMessage }
+
+function cmdDefaultRow(item) {
+  const label = escapeHtml(item?.label ?? '');
+  const sub = item?.sublabel ? `<span class="cmd-sublabel">${escapeHtml(item.sublabel)}</span>` : '';
+  return `<span class="cmd-label">${label}</span>${sub}`;
+}
+
+function cmdClose() {
+  if (!cmdPopover) return;
+  const pop = cmdPopover;
+  cmdPopover = null; // no dangling refs: node + listeners are GC'd with it
+  pop.el.remove();
+  els.prompt.focus(); // no-op while the prompt is disabled
+}
+
+function closeCommandPopover() { cmdClose(); }
+
+function isCommandPopoverOpen() { return Boolean(cmdPopover); }
+
+function setCommandPopoverFilter(text) {
+  if (!cmdPopover) return;
+  cmdPopover.filter = String(text ?? '');
+  cmdRenderList();
+}
+
+function cmdPaint() {
+  const s = cmdPopover;
+  if (!s) return;
+  for (const row of s.listEl.querySelectorAll('.cmd-item')) {
+    const sel = Number(row.dataset.idx) === s.highlight;
+    row.classList.toggle('cmd-hl', sel);
+    row.setAttribute('aria-selected', String(sel));
+  }
+}
+
+function cmdSetHighlight(idx) {
+  const s = cmdPopover;
+  if (!s || idx === s.highlight || idx < 0 || idx >= s.visible.length) return;
+  s.highlight = idx;
+  cmdPaint();
+  s.listEl.querySelector(`.cmd-item[data-idx="${idx}"]`)?.scrollIntoView({ block: 'nearest' });
+}
+
+function cmdMove(delta) {
+  const s = cmdPopover;
+  const n = s.visible.length;
+  if (!n) return;
+  const next = s.highlight < 0 ? (delta > 0 ? 0 : n - 1) : (s.highlight + delta + n) % n;
+  cmdSetHighlight(next);
+}
+
+function cmdSelect(idx) {
+  const s = cmdPopover;
+  if (!s || !s.visible[idx]) return;
+  // Contract: onSelect is called on Enter/click; the caller closes or
+  // replaces the popover from there.
+  s.onSelect?.(s.visible[idx]);
+}
+
+function cmdRow(item, idx) {
+  const li = document.createElement('li');
+  li.className = 'cmd-item';
+  li.dataset.idx = String(idx);
+  li.setAttribute('role', 'option');
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.innerHTML = cmdPopover.renderItem
+    ? cmdPopover.renderItem(item, idx === cmdPopover.highlight)
+    : cmdDefaultRow(item);
+  btn.addEventListener('click', (e) => { e.stopPropagation(); cmdSelect(idx); });
+  li.appendChild(btn);
+  li.addEventListener('mousemove', () => cmdSetHighlight(idx));
+  return li;
+}
+
+function cmdRenderList() {
+  const s = cmdPopover;
+  const q = s.filter.trim().toLowerCase();
+  s.visible = q
+    ? s.items.filter((it) => `${it.label ?? ''} ${it.sublabel ?? ''} ${it.group ?? ''}`.toLowerCase().includes(q))
+    : [...s.items];
+  s.listEl.innerHTML = '';
+  if (!s.visible.length) {
+    const li = document.createElement('li');
+    li.className = 'cmd-empty';
+    li.setAttribute('role', 'presentation');
+    li.textContent = s.emptyMessage;
+    s.listEl.appendChild(li);
+    s.highlight = -1;
+    return;
+  }
+  let lastGroup = null;
+  s.visible.forEach((item, idx) => {
+    if (item.group && item.group !== lastGroup) {
+      lastGroup = item.group;
+      const h = document.createElement('li');
+      h.className = 'cmd-group';
+      h.setAttribute('role', 'presentation');
+      h.textContent = item.group;
+      s.listEl.appendChild(h);
+    }
+    s.listEl.appendChild(cmdRow(item, idx));
+  });
+  if (s.highlight >= s.visible.length) s.highlight = s.visible.length - 1;
+  else if (s.highlight < 0) s.highlight = s.visible.length ? 0 : -1;
+  cmdPaint();
+}
+
+// Shared key handling for #prompt and the filter input (spec #3 + #6).
+function cmdHandleKey(e) {
+  if (!cmdPopover) return;
+  switch (e.key) {
+    case 'ArrowDown': e.preventDefault(); cmdMove(1); break;
+    case 'ArrowUp': e.preventDefault(); cmdMove(-1); break;
+    case 'Enter':
+      e.preventDefault(); // never submit the form while a popover is open
+      if (cmdPopover.highlight >= 0) cmdSelect(cmdPopover.highlight);
+      break;
+    case 'Escape':
+      e.preventDefault();
+      closeCommandPopover();
+      break;
+    case 'Tab':
+      closeCommandPopover(); // let the default focus move happen
+      break;
+    default:
+      // Type-ahead hook: keep the popover filter in sync with the prompt.
+      if (e.target === els.prompt) setCommandPopoverFilter(els.prompt.value);
+  }
+}
+
+function showCommandPopover({
+  anchor = els.composer,
+  items = [],
+  onSelect,
+  filterText = null,
+  placeholder = 'Filter…',
+  emptyMessage = 'No matches',
+  renderItem = null,
+} = {}) {
+  closeCommandPopover(); // opening replaces the old popover (old DOM first)
+  if (!anchor || typeof anchor.getBoundingClientRect !== 'function') anchor = els.composer;
+
+  const pop = document.createElement('div');
+  pop.id = 'cmd-popover';
+  pop.setAttribute('aria-label', 'Command popover');
+
+  let filterEl = null;
+  if (filterText !== null) {
+    filterEl = document.createElement('input');
+    filterEl.type = 'text';
+    filterEl.className = 'cmd-filter';
+    filterEl.placeholder = placeholder;
+    filterEl.value = String(filterText ?? '');
+    filterEl.setAttribute('aria-label', placeholder);
+    filterEl.addEventListener('input', () => setCommandPopoverFilter(filterEl.value));
+    filterEl.addEventListener('keydown', cmdHandleKey);
+    pop.appendChild(filterEl);
+  }
+
+  const ul = document.createElement('ul');
+  ul.className = 'cmd-list';
+  ul.setAttribute('role', 'listbox');
+  pop.appendChild(ul);
+  document.body.appendChild(pop);
+
+  // Above the anchor: popover bottom edge at the anchor's top, left edge
+  // aligned to it, both clamped so the popover never leaves the viewport.
+  const r = anchor.getBoundingClientRect();
+  const width = Math.min(340, window.innerWidth - 24);
+  pop.style.width = `${width}px`;
+  pop.style.left = `${Math.max(12, Math.min(r.left, window.innerWidth - 12 - width))}px`;
+  pop.style.bottom = `${Math.max(8, Math.min(window.innerHeight - r.top, window.innerHeight - CMD_POPOVER_MAX_HEIGHT - 8))}px`;
+
+  cmdPopover = {
+    el: pop,
+    listEl: ul,
+    filterEl,
+    items: Array.isArray(items) ? items : [],
+    onSelect,
+    renderItem,
+    filter: String(filterText ?? ''),
+    visible: [],
+    highlight: -1,
+    emptyMessage,
+  };
+  cmdRenderList();
+}
+
 // ── Live updates (polling) ─────────────────────────────────────
 
 // The gateway has no SSE endpoint for watching arbitrary sessions, so the
@@ -1187,7 +1384,18 @@ els.btnSend.addEventListener('click', (e) => {
 });
 
 els.prompt.addEventListener('input', autoResizePrompt);
+els.prompt.addEventListener('input', () => {
+  // TASK_BRIEF_8 hook: while a popover is open, keystrokes refilter it.
+  if (isCommandPopoverOpen()) setCommandPopoverFilter(els.prompt.value);
+});
 els.prompt.addEventListener('keydown', (e) => {
+  if (isCommandPopoverOpen()) {
+    // Popover takes over the keys: arrows move the highlight, Enter selects
+    // (never submits), Escape closes. The normal send flow stays untouched
+    // when no popover is open.
+    cmdHandleKey(e);
+    return;
+  }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     sendMessage(els.prompt.value);
