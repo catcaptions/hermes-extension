@@ -1201,10 +1201,20 @@ function pickAtFiles() {
   input.multiple = true;
   input.accept = '*/*';
   input.addEventListener('change', () => {
-    for (const f of [...(input.files || [])]) handleAtFile(f);
+    const files = [...(input.files || [])];
     input.remove();
-    renderAtFilePrompt();
-    atFileSession = null; // CRITIQUE_BRIEF_10 #10: round over — no stale session
+    // CRITIQUE_BRIEF_10FIX #1: FileReader.onload fires asynchronously, so the
+    // session must outlive the change handler — null it only once every
+    // pending read has resolved (or rejected), otherwise the chips never
+    // render and the send path drops the attachments.
+    let pending = files.length;
+    const roundDone = () => {
+      pending -= 1;
+      if (pending > 0) return;
+      renderAtFilePrompt();
+      atFileSession = null; // round over — no stale session
+    };
+    for (const f of files) handleAtFile(f, roundDone);
   });
   input.addEventListener('cancel', () => {
     // No files chosen — drop the transient '@file:' token, keep the rest.
@@ -1217,10 +1227,14 @@ function pickAtFiles() {
   input.click();
 }
 
-function handleAtFile(file) {
-  if (!file) return;
+function handleAtFile(file, done) {
+  if (!file) {
+    done?.();
+    return;
+  }
   if (file.type.startsWith('image/')) {
     ingestImageFile(file); // existing paste-to-bridge flow, no prompt token
+    done?.();
     return;
   }
   const binaryExt = /\.(zip|rar|7z|gz|bz2|xz|tar|exe|msi|dll|so|bin|pdf|docx|xlsx|pptx|iso|jar)$/i;
@@ -1229,6 +1243,7 @@ function handleAtFile(file) {
   const textMime = /^(text\/|application\/.*(json|xml)(;|$))/;
   if (binaryExt.test(file.name) || (file.type && !textMime.test(file.type))) {
     showBanner(`Skipped binary file: ${file.name}`, 'info');
+    done?.();
     return;
   }
   const reader = new FileReader();
@@ -1238,6 +1253,7 @@ function handleAtFile(file) {
     // binary data land as U+0000 (readAsText replaces invalid UTF-8).
     if (content.includes('\u0000')) {
       showBanner(`Skipped binary file: ${file.name}`, 'info');
+      done?.();
       return;
     }
     if (content.length > 512 * 1024) {
@@ -1246,8 +1262,12 @@ function handleAtFile(file) {
     const entry = queueAttached('file', file.name, content);
     atFileSession?.chips.push(entry.chip);
     renderAtFilePrompt();
+    done?.();
   };
-  reader.onerror = () => showBanner(`Could not read ${file.name}`, 'info');
+  reader.onerror = () => {
+    showBanner(`Could not read ${file.name}`, 'info');
+    done?.();
+  };
   reader.readAsText(file);
 }
 
@@ -1330,7 +1350,11 @@ async function confirmAtUrl() {
     showBanner(`Attach failed: ${error}`, 'info');
     return; // the raw token stays — the user can edit or delete it
   }
-  if (el.value.startsWith(head)) {
+  // CRITIQUE_BRIEF_10FIX #2: Esc (or an edit away from '@url:') while the
+  // fetch was in flight must cancel the commit — the value check alone
+  // can't catch it, since Esc leaves the prompt text untouched.
+  if (atUrlEscaped || !el.value.startsWith(head)) return;
+  {
     const entry = queueAttached('url', url, content || title || '');
     el.value = entry.chip + el.value.slice(head.length);
     autoResizePrompt();

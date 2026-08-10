@@ -82,13 +82,23 @@ def _norm_addr(addr):
 
 def _guard_addr(addr):
     """None if addr is a safe public address, else a short error string.
-    Blocks loopback (incl. IPv4-mapped IPv6) and the link-local block that
-    hosts cloud metadata (169.254.169.254)."""
+    Blocks loopback (incl. IPv4-mapped IPv6), the link-local block that
+    hosts cloud metadata (169.254.169.254), the RFC1918 private ranges
+    (10/8, 172.16/12, 192.168/16), and IPv6 link-local (fe80::/10)."""
     a = _norm_addr(addr)
     if a.startswith('127.') or a == '::1':
         return 'blocked'
-    if a.startswith('169.254.'):
+    if a.startswith('169.254.') or a.startswith('fe80:'):
         return 'blocked'
+    if a.startswith('10.') or a.startswith('192.168.'):
+        return 'blocked'
+    if a.startswith('172.'):
+        try:
+            octet = int(a.split('.', 2)[1])
+        except ValueError:
+            octet = -1
+        if 16 <= octet <= 31:
+            return 'blocked'
     return None
 
 
@@ -143,7 +153,9 @@ class _GuardHTTPConnection(http.client.HTTPConnection):
 class _GuardHTTPSConnection(http.client.HTTPSConnection):
     def connect(self):
         super().connect()
-        self._guard_peer()  # inherited: checked before the TLS handshake
+        self._guard_peer()  # inherited: verified after the TLS handshake
+        # (super().connect() wraps the socket first); no request bytes are
+        # sent either way — the peer check still closes the rebinding gap.
 
 
 class _GuardHTTPHandler(urllib.request.HTTPHandler):
