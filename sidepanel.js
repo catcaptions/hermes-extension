@@ -826,10 +826,18 @@ function updateRunningIndicator() {
 
 const CMD_POPOVER_MAX_HEIGHT = 260;
 
-let cmdPopover = null; // { el, listEl, items, onSelect, renderItem, filter, visible, highlight, emptyMessage }
-// TASK_BRIEF_9: '/name' last inserted by the skills menu — while the prompt
-// still starts with it, a fresh '/' hasn't been typed, so the menu stays closed.
+let cmdPopover = null; // { el, listEl, items, onSelect, renderItem, filter, visible, highlight, emptyMessage, owner }
+// TASK_BRIEF_9 / CRITIQUE_BRIEF_9 #4: name last inserted by the skills menu —
+// while the in-progress token (after the leading '/', up to whitespace) still
+// equals it, a fresh '/' hasn't been typed, so the menu stays closed.
 let slashInserted = null;
+// CRITIQUE_BRIEF_9 #1: Escape/Tab closes the menu but the '/' (or '@') stays,
+// so the next keystroke would reopen it. Dismissed-until-prefix-changes flags:
+// while the value still starts with the dismissed value, the menu stays closed.
+let slashDismissed = null; // '/…' value dismissed via Escape/Tab (skills menu)
+let atDismissed = null;    // '@…' value dismissed via Escape/Tab (@ picker)
+// CRITIQUE_BRIEF_9 #3: at most one /v1/skills fetch in flight.
+let skillsFetching = false;
 // TASK_BRIEF_10: mid-flow state for the @ picker.
 let atFileSession = null; // { chips, tail } while a @file: picker round is open
 let atUrlBusy = false;    // a bridge /fetch is in flight — no double-confirm
@@ -943,6 +951,15 @@ function cmdRenderList() {
   cmdPaint();
 }
 
+// CRITIQUE_BRIEF_9 #1: closing via Escape/Tab must not be undone by the next
+// keystroke — remember the prompt value, suppress the menu until it changes.
+function recordCmdDismissal() {
+  if (!cmdPopover?.owner) return;
+  const v = els.prompt.value;
+  if (cmdPopover.owner === 'skills' && v.startsWith('/')) slashDismissed = v;
+  else if (cmdPopover.owner === 'at' && v.startsWith('@')) atDismissed = v;
+}
+
 // Shared key handling for #prompt and the filter input (spec #3 + #6).
 function cmdHandleKey(e) {
   if (!cmdPopover) return;
@@ -955,9 +972,11 @@ function cmdHandleKey(e) {
       break;
     case 'Escape':
       e.preventDefault();
+      recordCmdDismissal();
       closeCommandPopover();
       break;
     case 'Tab':
+      recordCmdDismissal();
       closeCommandPopover(); // let the default focus move happen
       break;
   }
@@ -1010,6 +1029,7 @@ function showCommandPopover({
     listEl: ul,
     items: Array.isArray(items) ? items : [],
     onSelect,
+    owner: null, // 'skills' | 'at' | null — who opened it (CRITIQUE_BRIEF_9 #2)
     renderItem,
     filter: String(filterText ?? ''),
     visible: [],
@@ -1041,9 +1061,16 @@ function insertSkill(item) {
   const el = els.prompt;
   const end = typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length;
   const head = el.value.slice(0, end);
+  // CRITIQUE_BRIEF_9 #5: caret/selection outside the '/…' token (e.g. clicked
+  // at position 0) — nothing to insert; stay a true no-op.
+  if (!head.startsWith('/')) return;
   const inserted = `/${item.name}`;
-  if (head.startsWith('/')) el.value = inserted + el.value.slice(end);
-  slashInserted = inserted; // suppress reopening on the just-inserted token
+  // CRITIQUE_BRIEF_9 #6: replace the whole in-progress token (up to whitespace),
+  // not just the caret-to-head span — a mid-token selection would keep a tail.
+  const sp = el.value.search(/\s/);
+  const tokenEnd = sp === -1 ? el.value.length : sp;
+  el.value = inserted + el.value.slice(tokenEnd);
+  slashInserted = item.name; // CRITIQUE_BRIEF_9 #4: token-exact suppression
   closeCommandPopover();
   autoResizePrompt();
   const pos = el.value.length;
@@ -1051,10 +1078,12 @@ function insertSkill(item) {
   el.focus();
 }
 
-async function openSkillsMenu(term) {
-  // Re-check after the (cheap, local) fetch: the user may have deleted the
-  // '/' or another open already took over.
-  if (isCommandPopoverOpen() || !els.prompt.value.startsWith('/')) return;
+async function openSkillsMenu() {
+  // CRITIQUE_BRIEF_9 #3: one fetch in flight at a time — a slow gateway must
+  // not spawn a fetch per keystroke. Re-check after the (cheap, local) fetch:
+  // the user may have deleted the '/' or another open already took over.
+  if (skillsFetching || isCommandPopoverOpen() || !els.prompt.value.startsWith('/')) return;
+  skillsFetching = true;
   try {
     const res = await hermesFetch('/v1/skills');
     if (!res.ok) return; // silent — the next '/' re-fetches
@@ -1068,27 +1097,11 @@ async function openSkillsMenu(term) {
       placeholder: 'Filter skills…',
       emptyMessage: 'No skills match',
     });
+    cmdPopover.owner = 'skills'; // CRITIQUE_BRIEF_9 #2: who owns this open
   } catch {
     // gateway unreachable — no menu; typing continues as normal
-  }
-}
-
-// Prompt typing: opens the menu on a fresh '/', refilters on everything
-// after the '/', and closes when the leading '/' is deleted.
-function updateSlashMenu() {
-  const v = els.prompt.value;
-  if (slashInserted) {
-    if (v.startsWith(slashInserted)) return;
-    slashInserted = null; // token gone — normal rules resume
-  }
-  if (!v.startsWith('/')) {
-    if (isCommandPopoverOpen()) closeCommandPopover();
-    return;
-  }
-  if (isCommandPopoverOpen()) {
-    setCommandPopoverFilter(v.slice(1));
-  } else {
-    openSkillsMenu(v.slice(1));
+  } finally {
+    skillsFetching = false;
   }
 }
 
@@ -1113,6 +1126,7 @@ function openAtMenu(term) {
     placeholder: 'Filter references…',
     emptyMessage: 'No matches',
   });
+  cmdPopover.owner = 'at'; // CRITIQUE_BRIEF_9 #2: who owns this open
 }
 
 // Swap the leading '@…' (up to the caret) for a command token; returns the
@@ -1280,28 +1294,53 @@ async function confirmAtUrl() {
 // Prompt typing (TASK_BRIEF_10 extends the '/' hook): a leading '/' opens
 // the skills menu, a leading '@' the context picker; the two can never be
 // open together. Command tokens in use ('@url:', '@file:', '@image:') close
-// the picker so the URL/path can be typed freely.
+// the picker so the URL/path can be typed freely. CRITIQUE_BRIEF_9 #2: only
+// the popover this hook owns (owner 'skills' / 'at') is closed or refiltered
+// here — a foreign popover (e.g. a future model picker) is never touched.
 function updatePrefixMenu() {
   const v = els.prompt.value;
+  if (slashDismissed) {
+    if (v.startsWith(slashDismissed)) return;
+    slashDismissed = null; // prefix changed — dismissal expires
+  }
+  if (atDismissed) {
+    if (v.startsWith(atDismissed)) return;
+    atDismissed = null; // prefix changed — dismissal expires
+  }
   if (slashInserted) {
-    if (v.startsWith(slashInserted)) return;
+    // CRITIQUE_BRIEF_9 #4: compare the in-progress token, not a prefix — an
+    // append or a backspace inside the token ends the suppression.
+    const token = v.startsWith('/') ? v.slice(1).split(/\s/, 1)[0] : '';
+    if (token === slashInserted) return;
     slashInserted = null; // token gone — normal rules resume
   }
   if (v.startsWith('/')) {
-    if (isCommandPopoverOpen()) setCommandPopoverFilter(v.slice(1));
-    else openSkillsMenu(v.slice(1));
+    if (cmdPopover?.owner === 'skills') {
+      setCommandPopoverFilter(v.slice(1));
+    } else if (cmdPopover?.owner === 'at') {
+      closeCommandPopover(); // prefix flipped to '/' — stale @ picker
+      openSkillsMenu();
+    } else if (!cmdPopover) {
+      openSkillsMenu();
+    }
     return;
   }
   if (v.startsWith('@url:') || v.startsWith('@image:') || v.startsWith('@file:')) {
-    if (isCommandPopoverOpen()) closeCommandPopover();
+    if (cmdPopover?.owner === 'at') closeCommandPopover();
     return;
   }
   if (v.startsWith('@')) {
-    if (isCommandPopoverOpen()) setCommandPopoverFilter(v.slice(1));
-    else openAtMenu(v.slice(1));
+    if (cmdPopover?.owner === 'at') {
+      setCommandPopoverFilter(v.slice(1));
+    } else if (cmdPopover?.owner === 'skills') {
+      closeCommandPopover(); // prefix flipped to '@' — stale skills menu
+      openAtMenu(v.slice(1));
+    } else if (!cmdPopover) {
+      openAtMenu(v.slice(1));
+    }
     return;
   }
-  if (isCommandPopoverOpen()) closeCommandPopover();
+  if (cmdPopover?.owner === 'skills' || cmdPopover?.owner === 'at') closeCommandPopover();
 }
 
 // ── Live updates (polling) ─────────────────────────────────────
@@ -1496,6 +1535,9 @@ async function sendMessage(text) {
   showBanner('');
   closeCommandPopover(); // a '/' menu can't float over a disabled prompt
   els.prompt.value = '';
+  slashInserted = null; // CRITIQUE_BRIEF_9 #8: fresh prompt, fresh suppression
+  slashDismissed = null;
+  atDismissed = null;
   autoResizePrompt();
 
   // Ensure a session exists.
