@@ -195,9 +195,13 @@ browser-mcp.bat
 - `browser-mcp.bat` clears `PYTHONPATH` (this machine's env points at the Hermes
   venv, whose 3.11-built `pydantic_core` breaks Python 3.14 imports) and runs
   `py -3.14 -u browser-mcp.py`. Keep the console window open; loopback only.
-- **Pairing is TOFU**: the first extension `hello` pins that token to
-  `.live-browser-token` — no manual copying. To re-pin (e.g. after wiping the
-  extension's storage): `browser-mcp.bat --reset-pairing`, then restart.
+- **Pairing is TOFU, one slot per browser**: the first extension `hello` from
+  each browser (Chrome / Edge / Chromium) pins that browser's token to
+  `.live-browser-token` (JSON map; legacy single-token files migrate to a `*`
+  slot). A slot only re-pins on a hello carrying `rotate: true` (sidepanel
+  "Reset pairing" — not built yet, gate exists server-side). To wipe all pins:
+  `browser-mcp.bat --reset-pairing`, then restart. Env `LIVE_BROWSER_TOKEN`
+  pins `*` for every browser and disables TOFU.
 - Hermes-side registration (`~/.hermes/config.yaml` → `mcp_servers`):
 
   ```yaml
@@ -208,9 +212,11 @@ browser-mcp.bat
       env:
         PYTHONPATH: ""
       timeout: 120
+      connect_timeout: 60
   ```
 
-  Tools register as `mcp_live_browser_*` (B1 ships `browser_attach_status`).
+  Tools register as `mcp__live_browser__*` (B1 ships
+  `mcp__live_browser__browser_attach_status`).
 - Wire protocol: see [PROTOCOL.md](PROTOCOL.md).
 - Debugger conflicts: a tab open in DevTools can't be attached (`TAB_BUSY`)
   — close DevTools on that tab or pick another.

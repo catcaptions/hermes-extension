@@ -10,13 +10,19 @@ semantics on top — the envelope stays.
 - `ws://127.0.0.1:8644` — the hub **binds loopback only** and rejects
   non-loopback peers at connect time. No HTTP surface; the extension always
   connects **out** to the hub.
-- **Pairing token:** TOFU (trust-on-first-use). The hub has no pinned token at
-  first start; the **first** `hello` from any extension pins that extension's
-  token (persisted to `.live-browser-token` next to the script). Subsequent
-  hellos must match the pinned token — a wrong token closes the socket with
-  code `4401`. Override/pin explicitly with env `LIVE_BROWSER_TOKEN`;
-  `browser-mcp.py --reset-pairing` clears the pinned token. There is no
-  per-message token — the envelope has no field for it.
+- **Pairing token:** TOFU (trust-on-first-use), one slot **per browser** — the
+  `hello` carries `browser` (e.g. `Chrome`, `Edge`), and the **first** hello
+  from each browser pins that browser's token. Pins persist to
+  `.live-browser-token` next to the script: a JSON map `{"Chrome": tok, ...}`
+  when more than one browser is pinned, a single plain token when only the
+  legacy `*` slot exists (old single-token files are migrated to `*` on
+  load). Subsequent hellos must match their browser's pin — a mismatch
+  closes the socket with code `4401`. A browser's slot only re-pins when the
+  hello carries `rotate: true` (sidepanel "Reset pairing"); a new browser
+  arriving while only a legacy `*` pin exists takes its own slot instead.
+  Env `LIVE_BROWSER_TOKEN` pins `*` for every browser and disables TOFU
+  (no re-pin while set). `browser-mcp.py --reset-pairing` clears the file.
+  There is no per-message token — the envelope has no field for it.
 
 ## Envelope
 
@@ -73,7 +79,7 @@ attached) also get a `pong` — any pong keeps the heartbeat satisfied.
 
 | `cmd` | Direction | Purpose |
 |---|---|---|
-| `hello` | ext → hub | handshake `{token, extId, version, browser}`; wrong token → close `4401` |
+| `hello` | ext → hub | handshake `{token, extId, version, browser, rotate?}`; per-browser TOFU pin; wrong token → close `4401`; `rotate: true` re-pins the browser's slot |
 | `cdp` | hub → ext | relay `method`/`params` to the attached tab; reply with CDP result/error |
 | `status` | hub → ext | reply `{attached, tab: {id,title,url,incognito}|null, debugger: "attached"|"none", browser}` |
 | `ping` / `pong` | either | liveness (hub heartbeat 15 s/10 s; extension SW keep-alive) |
