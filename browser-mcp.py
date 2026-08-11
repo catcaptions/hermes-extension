@@ -5,18 +5,22 @@ browser-mcp.py — Hermes browser-use layer, Phase B1.
 MCP server (stdio, FastMCP) that doubles as a loopback WebSocket hub for the
 Hermes extension (background.js). The extension connects OUT to
 ws://127.0.0.1:8644, pairs with a token, and relays chrome.debugger CDP
-traffic. The MCP tool surface (server "live_browser" -> mcp_live_browser_*)
+traffic. The MCP tool surface (server "live_browser" -> mcp__live_browser__*)
 drives the USER'S REAL browser — existing tabs, cookies, logins.
 
 Run (stdio transport — Hermes launches it; see README):
     python browser-mcp.py
     requires: pip install fastmcp websockets
 
-Pairing token: TOFU (trust-on-first-use) — the FIRST extension hello pins the
-token to `.live-browser-token` next to this script; no manual sync needed.
-Override with env LIVE_BROWSER_TOKEN to pin a specific token; `--reset-pairing`
-clears the pinned token (run `python browser-mcp.py --print-token` for the
-current token, or `(tofu)` when unpinned).
+Pairing token: TOFU (trust-on-first-use), one slot PER BROWSER — the first
+hello from each browser (e.g. Chrome, Edge) pins that browser's token to
+`.live-browser-token` next to this script (JSON map; legacy single-token
+files are migrated to a '*' slot). No manual sync needed. A browser's slot
+only re-pins on a hello carrying `rotate: true` (sidepanel "Reset pairing");
+a new browser arriving under a legacy '*' pin gets its own slot. Override/pin
+all browsers with env LIVE_BROWSER_TOKEN (no TOFU while set);
+`--reset-pairing` clears the file (run `python browser-mcp.py --print-token`
+for the current pin map, or `(tofu)` when unpinned).
 
 Protocol: see PROTOCOL.md
 """
@@ -69,7 +73,9 @@ class Bridge:
     thread resolves the futures when the extension replies."""
 
     def __init__(self):
-        self.token = ''
+        self.pins = {}            # browser name -> pinned token (per-browser TOFU)
+        self.env_pin = False      # pins came from LIVE_BROWSER_TOKEN (no TOFU)
+        self.paired_browser = ''  # browser that holds the current pairing
         self._loop = None
         self._conn = None
         self.paired = False
@@ -176,33 +182,52 @@ class Connection:
         cmd = msg.get('cmd')
         if cmd == 'hello':
             with bridge._lock:
-                if bridge.token is None:
-                    # TOFU: pin whatever token the first extension sends.
-                    incoming = str(msg.get('token') or '')
-                    if not incoming:
-                        bridge.paired = False
-                    else:
-                        bridge.token = incoming
-                        try:
-                            PAIRING_FILE.write_text(incoming)
-                        except OSError as e:
-                            log('warning: could not write pairing file: %s' % e)
-                        bridge.paired = True
-                        bridge.browser = str(msg.get('browser') or 'Chrome')[:64]
-                        bridge.ext_version = str(msg.get('version') or '')[:64]
-                        ext_id = str(msg.get('extId') or '?')[:64]
-                        log('TOFU paired with extension %s v%s — token pinned to %s'
-                            % (ext_id, bridge.ext_version, PAIRING_FILE.name))
-                        return
-                elif msg.get('token') == bridge.token:
+                browser_name = str(msg.get('browser') or '*')[:64]
+                incoming = str(msg.get('token') or '')
+                # Pin lookup: exact browser key first, '*' fallback for legacy pins.
+                pin = bridge.pins.get(browser_name) or bridge.pins.get('*')
+                if not incoming:
+                    bridge.paired = False
+                elif pin is None:
+                    # TOFU: pin whatever token this browser's extension sends.
+                    bridge.pins[browser_name] = incoming
+                    _save_pins()
                     bridge.paired = True
-                    bridge.browser = str(msg.get('browser') or 'Chrome')[:64]
+                    bridge.paired_browser = browser_name
+                    bridge.browser = browser_name
                     bridge.ext_version = str(msg.get('version') or '')[:64]
                     ext_id = str(msg.get('extId') or '?')[:64]
-                    log('paired with extension %s v%s' % (ext_id, bridge.ext_version))
+                    log('TOFU paired with extension %s v%s (%s) — token pinned to %s'
+                        % (ext_id, bridge.ext_version, browser_name, PAIRING_FILE.name))
+                    return
+                elif incoming == pin:
+                    bridge.paired = True
+                    bridge.paired_browser = browser_name
+                    bridge.browser = browser_name
+                    bridge.ext_version = str(msg.get('version') or '')[:64]
+                    ext_id = str(msg.get('extId') or '?')[:64]
+                    log('paired with extension %s v%s (%s)' % (ext_id, bridge.ext_version, browser_name))
+                    return
+                elif (browser_name in bridge.pins and msg.get('rotate')) or (
+                        set(bridge.pins) == {'*'} and not bridge.env_pin):
+                    # Explicit user-initiated token rotation (sidepanel "Reset
+                    # pairing" -> rotate:true), OR a new browser arriving under a
+                    # legacy '*' pin -> give that browser its own slot. The
+                    # legacy-migration branch is disabled while LIVE_BROWSER_TOKEN
+                    # pins '*' — otherwise any hello from an unpinned browser
+                    # would self-pin and bypass the env token.
+                    bridge.pins[browser_name] = incoming
+                    _save_pins()
+                    bridge.paired = True
+                    bridge.paired_browser = browser_name
+                    bridge.browser = browser_name
+                    bridge.ext_version = str(msg.get('version') or '')[:64]
+                    ext_id = str(msg.get('extId') or '?')[:64]
+                    log('TOFU paired with extension %s v%s (%s) — token pinned to %s'
+                        % (ext_id, bridge.ext_version, browser_name, PAIRING_FILE.name))
                     return
                 bridge.paired = False
-            log('rejected hello: bad token')
+            log('rejected hello: bad token (%s)' % str(msg.get('browser') or '?'))
             await self.send({'id': msg.get('id'), 'ok': False, 'error': 'bad token'})
             await self.ws.close(code=4401, reason='bad token')
             return
@@ -322,6 +347,34 @@ def browser_attach_status() -> dict:
     }
 
 
+def _save_pins():
+    """Persist the pin map. Callers MUST already hold bridge._lock (the
+    threading.Lock is NOT reentrant — acquiring it again here deadlocks
+    the event loop). Falls back to a single plain-text token file when
+    only one browser is pinned (keeps the file human-readable)."""
+    try:
+        if len(bridge.pins) == 1 and '*' in bridge.pins:
+            PAIRING_FILE.write_text(bridge.pins['*'])
+        else:
+            PAIRING_FILE.write_text(json.dumps(bridge.pins, indent=2))
+    except OSError as e:
+        log('warning: could not write pairing file: %s' % e)
+
+
+def _load_pins():
+    """Read the pin map, migrating a legacy plain-token file to the map form."""
+    if not PAIRING_FILE.exists():
+        return {}
+    raw = PAIRING_FILE.read_text().strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {'*': str(parsed)}
+    except ValueError:
+        return {'*': raw}
+
+
 def main():
     if '--reset-pairing' in sys.argv:
         if PAIRING_FILE.exists():
@@ -330,17 +383,21 @@ def main():
         else:
             log('no pairing file to reset')
         return
-    token = os.environ.get('LIVE_BROWSER_TOKEN', '').strip()
-    if not token and PAIRING_FILE.exists():
-        token = PAIRING_FILE.read_text().strip()
-        log('using pinned token from %s' % PAIRING_FILE.name)
-    bridge.token = token or None
-    if bridge.token:
-        log('pairing: token pinned (%s)' % ('env LIVE_BROWSER_TOKEN' if os.environ.get('LIVE_BROWSER_TOKEN') else PAIRING_FILE.name))
+    env_token = os.environ.get('LIVE_BROWSER_TOKEN', '').strip()
+    if env_token:
+        bridge.pins = {'*': env_token}
+        bridge.env_pin = True
+        log('pairing: token pinned via env LIVE_BROWSER_TOKEN')
     else:
-        log('pairing: TOFU — first extension hello will be accepted and pinned to %s' % PAIRING_FILE.name)
+        bridge.pins = _load_pins()
+        if bridge.pins:
+            log('pairing: using pinned token map from %s (%s)'
+                % (PAIRING_FILE.name, ', '.join(bridge.pins.keys())))
+        else:
+            log('pairing: TOFU — first extension hello per browser will be '
+                'accepted and pinned to %s' % PAIRING_FILE.name)
     if '--print-token' in sys.argv:
-        print(bridge.token or '(tofu)')
+        print(json.dumps(bridge.pins) if bridge.pins else '(tofu: unpaired)')
         return
     log('MCP stdio server "live_browser" up; WS hub on ws://%s:%d (loopback only)'
         % (HOST, PORT))
