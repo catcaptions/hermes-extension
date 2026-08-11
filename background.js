@@ -65,6 +65,7 @@ async function onWsOpen() {
     browser: BROWSER_NAME,
   });
   broadcastBrowserState();
+  autoAttachToActiveTab('paired'); // follow the user's current tab automatically
 }
 
 function onWsClose() {
@@ -179,6 +180,29 @@ async function clearAttached(tabId) {
     await chrome.storage.local.set({ attachedTabId: null });
   }
 }
+
+// ── Auto-attach: follow the user's current tab ───────────────────
+// After pairing, and on every tab switch, attach the debugger to the
+// active tab so the hub always drives the tab the user is looking at.
+async function autoAttachToActiveTab(reason) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return; // bridge down
+  const current = await getAttachedTabId();
+  let active = null;
+  try {
+    [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+  } catch {}
+  if (!active || active.id === current) return;
+  const res = await attachTab(active.id);
+  if (!res.ok) {
+    // TAB_BUSY (DevTools open) is expected; retried on the next tab event.
+    console.log(`auto-attach(${reason}): tab ${active.id} — ${res.error}`);
+  }
+}
+
+chrome.tabs.onActivated.addListener(() => autoAttachToActiveTab('activated'));
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
+  if (changeInfo.status === 'complete') autoAttachToActiveTab('updated');
+});
 
 // chrome.debugger events are forwarded to the hub as-is (consumed from B2
 // on: epoch invalidation, console/network buffers).
