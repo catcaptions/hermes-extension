@@ -27,7 +27,6 @@ Protocol: see PROTOCOL.md
 """
 import asyncio
 import concurrent.futures
-import itertools
 import json
 import os
 from pathlib import Path
@@ -85,7 +84,6 @@ class Bridge:
         self.ext_version = ''
         self._lock = threading.Lock()
         self._pending = {}
-        self._ids = itertools.count(1)
 
     def is_connected(self):
         with self._lock:
@@ -106,7 +104,7 @@ class Bridge:
     def request(self, cmd, payload, timeout):
         """Send a request to the extension and wait for its reply.
         Returns (ok, result_or_error)."""
-        msg_id = next(self._ids)
+        msg_id = secrets.randbelow(2 ** 53)  # unguessable (spoofing, first-writer-wins)
         fut = concurrent.futures.Future()
         with self._lock:
             if not self.paired or self._conn is None:
@@ -144,6 +142,8 @@ class Connection:
         self.active = True
         self.pong_event = asyncio.Event()
         self._send_lock = asyncio.Lock()
+        self.reader_task = None
+        self.heartbeat_task = None
 
     async def send(self, obj):
         try:
@@ -277,6 +277,8 @@ class Connection:
             return
         if cmd == 'pong':
             self.pong_event.set()
+        elif cmd == 'ping':
+            await self.send({'cmd': 'pong'})
         elif cmd == 'detach':
             with bridge._lock:
                 bridge.attached = None
@@ -291,6 +293,10 @@ class Connection:
         self.active = False
         self.pong_event.set()
         with bridge._lock:
+            if bridge._conn is not self:
+                # Superseded by a newer connection (takeover) — do NOT clear
+                # shared state that the healthy connection owns.
+                return
             bridge._conn = None
             bridge.paired = False
             bridge.attached = None
@@ -319,10 +325,26 @@ async def ws_handler(ws):
             pass
         return
     conn = Connection(ws)
+    old = None
     with bridge._lock:
+        old = bridge._conn
+        if old is not None and old is not conn:
+            old.active = False
+            old.pong_event.set()
         bridge._conn = conn
+    if old is not None and old is not conn:
+        # Takeover (last-writer-wins): the previous connection is
+        # superseded — cancel its tasks so its shutdown() cannot poison
+        # the new pairing. websockets closes the superseded socket when
+        # the old handler exits. (4403-reject was rejected instead because
+        # the extension treats a missing ack as failure and would back off
+        # forever while the other browser holds the slot.)
+        old.reader_task.cancel()
+        old.heartbeat_task.cancel()
     reader_task = asyncio.create_task(conn.reader())
     heartbeat_task = asyncio.create_task(conn.heartbeat())
+    conn.reader_task = reader_task
+    conn.heartbeat_task = heartbeat_task
     await reader_task
     heartbeat_task.cancel()
     await conn.shutdown('connection closed')
@@ -387,7 +409,10 @@ def _save_pins():
     """Persist the pin map. Callers MUST already hold bridge._lock (the
     threading.Lock is NOT reentrant — acquiring it again here deadlocks
     the event loop). Falls back to a single plain-text token file when
-    only one browser is pinned (keeps the file human-readable)."""
+    only one browser is pinned (keeps the file human-readable).
+    ponytail: blocking file I/O on the event loop under the lock — fine at
+    B1 size (one tiny file per pairing); move off the loop before B2
+    buffers/screenshots grow."""
     try:
         if len(bridge.pins) == 1 and '*' in bridge.pins:
             PAIRING_FILE.write_text(bridge.pins['*'])
