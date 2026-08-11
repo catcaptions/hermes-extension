@@ -17,10 +17,11 @@ hello from each browser (e.g. Chrome, Edge) pins that browser's token to
 `.live-browser-token` next to this script (JSON map; legacy single-token
 files are migrated to a '*' slot). No manual sync needed. A browser's slot
 only re-pins on a hello carrying `rotate: true` (sidepanel "Reset pairing");
-a new browser arriving under a legacy '*' pin gets its own slot. Override/pin
-all browsers with env LIVE_BROWSER_TOKEN (no TOFU while set);
-`--reset-pairing` clears the file (run `python browser-mcp.py --print-token`
-for the current pin map, or `(tofu)` when unpinned).
+a legacy '*' pin migrates to a named slot only for a token that matches it,
+and is pruned afterwards. Override/pin all browsers with env
+LIVE_BROWSER_TOKEN (no TOFU while set); `--reset-pairing` clears the file
+(run `python browser-mcp.py --print-token` for the current pin map, or
+`(tofu)` when unpinned).
 
 Protocol: see PROTOCOL.md
 """
@@ -184,9 +185,45 @@ class Connection:
             with bridge._lock:
                 browser_name = str(msg.get('browser') or '*')[:64]
                 incoming = str(msg.get('token') or '')
-                # Pin lookup: exact browser key first, '*' fallback for legacy pins.
-                pin = bridge.pins.get(browser_name) or bridge.pins.get('*')
                 if not incoming:
+                    # Soft unpaired: no token, nothing to pin, socket stays
+                    # open (an empty token is not a bad-token reject).
+                    bridge.paired = False
+                    return
+                # Exact slot first; a legacy '*' pin is only a migration
+                # source, never a pair-by-value master credential.
+                pin = bridge.pins.get(browser_name)
+                wildcard = bridge.pins.get('*') if pin is None else None
+                if pin is None and wildcard is not None and incoming == wildcard:
+                    if bridge.env_pin:
+                        # Env token pins every browser: pair under '*' with
+                        # no slot bookkeeping (and no pin-file write).
+                        bridge.paired = True
+                        bridge.paired_browser = browser_name
+                        bridge.browser = browser_name
+                        bridge.ext_version = str(msg.get('version') or '')[:64]
+                        log('paired with extension %s v%s (%s)'
+                            % (str(msg.get('extId') or '?')[:64], bridge.ext_version,
+                               browser_name))
+                    else:
+                        # Legacy '*' pin: migrate to a named slot and prune
+                        # the master key so it can't mint other slots.
+                        bridge.pins[browser_name] = incoming
+                        del bridge.pins['*']
+                        _save_pins()
+                        bridge.paired = True
+                        bridge.paired_browser = browser_name
+                        bridge.browser = browser_name
+                        bridge.ext_version = str(msg.get('version') or '')[:64]
+                        ext_id = str(msg.get('extId') or '?')[:64]
+                        log('TOFU paired (migrated from legacy pin) with extension '
+                            '%s v%s (%s) — token pinned to %s'
+                            % (ext_id, bridge.ext_version, browser_name,
+                               PAIRING_FILE.name))
+                elif pin is None and wildcard is not None:
+                    # A legacy '*' pin exists but this token isn't it — a
+                    # local process that only knows the port must not mint
+                    # a slot (self-pin window closed).
                     bridge.paired = False
                 elif pin is None:
                     # TOFU: pin whatever token this browser's extension sends.
@@ -199,23 +236,17 @@ class Connection:
                     ext_id = str(msg.get('extId') or '?')[:64]
                     log('TOFU paired with extension %s v%s (%s) — token pinned to %s'
                         % (ext_id, bridge.ext_version, browser_name, PAIRING_FILE.name))
-                    return
                 elif incoming == pin:
                     bridge.paired = True
                     bridge.paired_browser = browser_name
                     bridge.browser = browser_name
                     bridge.ext_version = str(msg.get('version') or '')[:64]
                     ext_id = str(msg.get('extId') or '?')[:64]
-                    log('paired with extension %s v%s (%s)' % (ext_id, bridge.ext_version, browser_name))
-                    return
-                elif (browser_name in bridge.pins and msg.get('rotate')) or (
-                        set(bridge.pins) == {'*'} and not bridge.env_pin):
-                    # Explicit user-initiated token rotation (sidepanel "Reset
-                    # pairing" -> rotate:true), OR a new browser arriving under a
-                    # legacy '*' pin -> give that browser its own slot. The
-                    # legacy-migration branch is disabled while LIVE_BROWSER_TOKEN
-                    # pins '*' — otherwise any hello from an unpinned browser
-                    # would self-pin and bypass the env token.
+                    log('paired with extension %s v%s (%s)'
+                        % (ext_id, bridge.ext_version, browser_name))
+                elif msg.get('rotate'):
+                    # Explicit user-initiated token rotation (sidepanel
+                    # "Reset pairing" -> one-shot rotate:true hello).
                     bridge.pins[browser_name] = incoming
                     _save_pins()
                     bridge.paired = True
@@ -225,10 +256,15 @@ class Connection:
                     ext_id = str(msg.get('extId') or '?')[:64]
                     log('TOFU paired with extension %s v%s (%s) — token pinned to %s'
                         % (ext_id, bridge.ext_version, browser_name, PAIRING_FILE.name))
-                    return
-                bridge.paired = False
+                else:
+                    bridge.paired = False
+            if bridge.paired:
+                await self.send({'cmd': 'hello-ack', 'ok': True,
+                                 'browser': bridge.browser,
+                                 'version': bridge.ext_version})
+                return
             log('rejected hello: bad token (%s)' % str(msg.get('browser') or '?'))
-            await self.send({'id': msg.get('id'), 'ok': False, 'error': 'bad token'})
+            await self.send({'cmd': 'hello-ack', 'ok': False})
             await self.ws.close(code=4401, reason='bad token')
             return
         if cmd is None:
