@@ -198,6 +198,7 @@ async function broadcastBrowserState() {
 // ── Attach / detach ──────────────────────────────────────────────
 
 async function attachTab(tabId) {
+  const previous = await getAttachedTabId();
   try {
     await chrome.debugger.attach({ tabId }, '1.3');
   } catch (err) {
@@ -206,6 +207,12 @@ async function attachTab(tabId) {
       return { ok: false, error: TAB_BUSY_MSG, message };
     }
     return { ok: false, error: message };
+  }
+  if (previous != null && previous !== tabId) {
+    // Free the previous session now that the new one is live (best-effort).
+    // Attach-first ordering: a TAB_BUSY on the new tab leaves the old
+    // session attached instead of overwriting the storage id.
+    try { await chrome.debugger.detach({ tabId: previous }); } catch {}
   }
   let info = null;
   try {
@@ -256,11 +263,17 @@ chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
   if (changeInfo.status === 'complete') autoAttachToActiveTab('updated');
 });
 
-// chrome.debugger events are forwarded to the hub as-is (consumed from B2
-// on: epoch invalidation, console/network buffers).
+// chrome.debugger events are forwarded to the hub (consumed from B2 on:
+// epoch invalidation, console/network buffers). Keyed by the ACTIVE tab:
+// leaked or non-active sessions must not reach the hub (their events would
+// poison the epoch/ref logic).
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId == null) return; // non-tab targets only
-  wsSend({ cmd: 'event', method, params, tabId: source.tabId });
+  getAttachedTabId().then((attachedTabId) => {
+    if (attachedTabId === source.tabId) {
+      wsSend({ cmd: 'event', method, params, tabId: source.tabId });
+    }
+  });
 });
 
 chrome.debugger.onDetach.addListener(async (source, reason) => {
@@ -327,14 +340,21 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 async function disconnectAll() {
-  // Kill-switch: close the WS, detach every debugger session, pause
+  // Kill-switch: close the WS, detach EVERY debugger session, pause
   // auto-reconnect until the user reconnects from the sidepanel.
   wsEnabled = false;
   clearTimeout(wsTimer);
   try { ws?.close(); } catch {}
   ws = null;
-  const tabId = await getAttachedTabId();
-  if (tabId != null) await detachTab(tabId);
+  try {
+    const targets = await chrome.debugger.getTargets();
+    for (const t of targets) {
+      if (t.tabId != null && t.attached) {
+        try { await chrome.debugger.detach({ tabId: t.tabId }); } catch {}
+      }
+    }
+  } catch {}
+  await chrome.storage.local.set({ attachedTabId: null });
   await chrome.alarms.clear(KEEPALIVE_ALARM);
   broadcastBrowserState();
   return { ok: true };
