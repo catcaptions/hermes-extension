@@ -14,8 +14,25 @@ const TAB_BUSY_MSG = 'TAB_BUSY';
 // clamped by Chrome anyway, so use 30 s directly.
 const KEEPALIVE_PERIOD_MIN = 0.5;
 
-const BROWSER_NAME =
-  (navigator.userAgentData?.brands?.[0]?.brand) || 'Chrome';
+function detectBrowserName() {
+  // userAgentData.brands[0] is often the low-entropy placeholder
+  // "Not=A?Brand" — scan for the real brand instead.
+  const brands = navigator.userAgentData?.brands;
+  if (brands) {
+    for (const b of brands) {
+      const name = (b.brand || '').toLowerCase();
+      if (name.includes('chrome')) return 'Chrome';
+      if (name.includes('edge') || name.includes('edg')) return 'Edge';
+      if (name.includes('chromium')) return 'Chromium';
+    }
+  }
+  const ua = navigator.userAgent;
+  if (/Edg\//i.test(ua)) return 'Edge';
+  if (/Chrome\//i.test(ua)) return 'Chrome';
+  return 'Chrome';
+}
+
+const BROWSER_NAME = detectBrowserName();
 
 // ── WS client ────────────────────────────────────────────────────
 
