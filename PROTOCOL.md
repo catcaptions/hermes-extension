@@ -10,16 +10,13 @@ semantics on top — the envelope stays.
 - `ws://127.0.0.1:8644` — the hub **binds loopback only** and rejects
   non-loopback peers at connect time. No HTTP surface; the extension always
   connects **out** to the hub.
-- **Pairing token:** the extension generates `crypto.randomUUID()` once,
-  stores it in `chrome.storage.local` (`liveBrowserToken`), and sends it in
-  the `hello` frame. The hub's expected token comes from env
-  `LIVE_BROWSER_TOKEN` (auto-generated + printed to stderr at startup when
-  unset; `--print-token` prints a copyable line and exits). A wrong token
-  closes the socket with code `4401`.
-- The socket is authenticated by `hello`; after that the hub trusts that
-  socket (the extension's messages carry no per-message token — the
-  envelope has no field for it). Token must match exactly on both ends;
-  a mismatch is silent (no logging of the token itself).
+- **Pairing token:** TOFU (trust-on-first-use). The hub has no pinned token at
+  first start; the **first** `hello` from any extension pins that extension's
+  token (persisted to `.live-browser-token` next to the script). Subsequent
+  hellos must match the pinned token — a wrong token closes the socket with
+  code `4401`. Override/pin explicitly with env `LIVE_BROWSER_TOKEN`;
+  `browser-mcp.py --reset-pairing` clears the pinned token. There is no
+  per-message token — the envelope has no field for it.
 
 ## Envelope
 

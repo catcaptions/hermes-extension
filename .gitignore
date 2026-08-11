@@ -6,6 +6,7 @@
 *.pem
 *.p12
 *.pfx
+.live-browser-token
 
 # ── OS noise ─────────────────────────────────────────────────
 Thumbs.db

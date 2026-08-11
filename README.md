@@ -188,24 +188,25 @@ How it fits together:
 **Setup:**
 
 ```bat
-pip install fastmcp websockets
-python browser-mcp.py
+py -3.14 -m pip install --user fastmcp websockets
+browser-mcp.bat
 ```
 
-- Keep the console window open. The hub binds loopback only.
-- Pairing token: `LIVE_BROWSER_TOKEN` env, or auto-generated at startup
-  (printed to **stderr** — stdout is the MCP protocol; `--print-token`
-  prints a copyable line). The extension generates its own token on first
-  run — you must copy the server's token into
-  `LIVE_BROWSER_TOKEN` for the server, and the extension token is read from
-  the sidepanel chip state. If either token changes, reload the extension.
+- `browser-mcp.bat` clears `PYTHONPATH` (this machine's env points at the Hermes
+  venv, whose 3.11-built `pydantic_core` breaks Python 3.14 imports) and runs
+  `py -3.14 -u browser-mcp.py`. Keep the console window open; loopback only.
+- **Pairing is TOFU**: the first extension `hello` pins that token to
+  `.live-browser-token` — no manual copying. To re-pin (e.g. after wiping the
+  extension's storage): `browser-mcp.bat --reset-pairing`, then restart.
 - Hermes-side registration (`~/.hermes/config.yaml` → `mcp_servers`):
 
   ```yaml
   mcp_servers:
     live_browser:
-      command: "python"
-      args: ["C:\\projects\\browser-extensions\\hermes-minimal-extension\\browser-mcp.py"]
+      command: "py"
+      args: ["-3.14", "-u", "C:\\projects\\browser-extensions\\hermes-minimal-extension\\browser-mcp.py"]
+      env:
+        PYTHONPATH: ""
       timeout: 120
   ```
 

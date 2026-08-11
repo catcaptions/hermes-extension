@@ -12,9 +12,11 @@ Run (stdio transport — Hermes launches it; see README):
     python browser-mcp.py
     requires: pip install fastmcp websockets
 
-Pairing token: env LIVE_BROWSER_TOKEN. When unset a random token is
-generated and printed to STDERR at startup (stdout is reserved for the MCP
-protocol — run `python browser-mcp.py --print-token` for a copyable line).
+Pairing token: TOFU (trust-on-first-use) — the FIRST extension hello pins the
+token to `.live-browser-token` next to this script; no manual sync needed.
+Override with env LIVE_BROWSER_TOKEN to pin a specific token; `--reset-pairing`
+clears the pinned token (run `python browser-mcp.py --print-token` for the
+current token, or `(tofu)` when unpinned).
 
 Protocol: see PROTOCOL.md
 """
@@ -23,9 +25,14 @@ import concurrent.futures
 import itertools
 import json
 import os
+from pathlib import Path
 import secrets
 import sys
 import threading
+
+# TOFU pairing: the FIRST extension hello pins the token (persisted here), so
+# no manual token sync is ever needed. Set LIVE_BROWSER_TOKEN to override/pin.
+PAIRING_FILE = Path(__file__).resolve().with_name('.live-browser-token')
 
 # Never write __pycache__/.pyc — Chrome/Edge refuse to load an unpacked
 # extension whose root contains a name starting with "_" (see README).
@@ -169,7 +176,25 @@ class Connection:
         cmd = msg.get('cmd')
         if cmd == 'hello':
             with bridge._lock:
-                if not bridge.paired and msg.get('token') == bridge.token:
+                if bridge.token is None:
+                    # TOFU: pin whatever token the first extension sends.
+                    incoming = str(msg.get('token') or '')
+                    if not incoming:
+                        bridge.paired = False
+                    else:
+                        bridge.token = incoming
+                        try:
+                            PAIRING_FILE.write_text(incoming)
+                        except OSError as e:
+                            log('warning: could not write pairing file: %s' % e)
+                        bridge.paired = True
+                        bridge.browser = str(msg.get('browser') or 'Chrome')[:64]
+                        bridge.ext_version = str(msg.get('version') or '')[:64]
+                        ext_id = str(msg.get('extId') or '?')[:64]
+                        log('TOFU paired with extension %s v%s — token pinned to %s'
+                            % (ext_id, bridge.ext_version, PAIRING_FILE.name))
+                        return
+                elif msg.get('token') == bridge.token:
                     bridge.paired = True
                     bridge.browser = str(msg.get('browser') or 'Chrome')[:64]
                     bridge.ext_version = str(msg.get('version') or '')[:64]
@@ -298,14 +323,25 @@ def browser_attach_status() -> dict:
 
 
 def main():
-    token = os.environ.get('LIVE_BROWSER_TOKEN', '').strip() or secrets.token_hex(16)
-    if '--print-token' in sys.argv:
-        print(token)
+    if '--reset-pairing' in sys.argv:
+        if PAIRING_FILE.exists():
+            PAIRING_FILE.unlink()
+            log('pairing reset — next extension hello will be re-pinned')
+        else:
+            log('no pairing file to reset')
         return
-    bridge.token = token
-    if not os.environ.get('LIVE_BROWSER_TOKEN'):
-        log('no LIVE_BROWSER_TOKEN in env — generated one (set it to pin):')
-        log('LIVE_BROWSER_TOKEN=' + token)
+    token = os.environ.get('LIVE_BROWSER_TOKEN', '').strip()
+    if not token and PAIRING_FILE.exists():
+        token = PAIRING_FILE.read_text().strip()
+        log('using pinned token from %s' % PAIRING_FILE.name)
+    bridge.token = token or None
+    if bridge.token:
+        log('pairing: token pinned (%s)' % ('env LIVE_BROWSER_TOKEN' if os.environ.get('LIVE_BROWSER_TOKEN') else PAIRING_FILE.name))
+    else:
+        log('pairing: TOFU — first extension hello will be accepted and pinned to %s' % PAIRING_FILE.name)
+    if '--print-token' in sys.argv:
+        print(bridge.token or '(tofu)')
+        return
     log('MCP stdio server "live_browser" up; WS hub on ws://%s:%d (loopback only)'
         % (HOST, PORT))
     threading.Thread(target=_ws_thread, name='ws-hub', daemon=True).start()
