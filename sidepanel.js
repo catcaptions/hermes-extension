@@ -84,6 +84,7 @@ const els = {
   btnBrowserRefresh: $('btn-browser-refresh'),
   btnBrowserCollapse: $('btn-browser-collapse'),
   btnBrowserDisconnect: $('btn-browser-disconnect'),
+  btnBrowserResetPairing: $('btn-browser-reset-pairing'),
 };
 
 // ── State ────────────────────────────────────────────────────────
@@ -2505,6 +2506,13 @@ function initBrowserUI() {
     } else {
       browserConnect();
     }
+  });
+  els.btnBrowserResetPairing.addEventListener('click', async () => {
+    await chrome.runtime.sendMessage({ type: 'browser-reset-pairing' });
+    browserState = { ws: 'down', attached: false, tab: null };
+    renderBrowserChip();
+    renderBrowserTabs();
+    showBanner('Pairing reset — reconnecting with a fresh token', 'info');
   });
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg?.type === 'browser-state') {
