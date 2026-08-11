@@ -327,6 +327,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = os.path.normcase(os.path.realpath(raw))
         if not any(path == root or path.startswith(root + os.sep) for root in ROOTS):
             return self._send(403, b'path outside allowed roots')
+        if _blocked_path(path):  # CRITIQUE_BRIEF_12 #2: sensitive-path blocklist
+            return self._send(403, b'blocked')
         if not os.path.isfile(path):
             return self._send(404, b'file not found')
         try:

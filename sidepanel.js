@@ -852,6 +852,7 @@ let skillsFetching = false;
 // TASK_BRIEF_10: mid-flow state for the @ picker.
 let atFileSession = null; // { chips, prefix, tail } while a @file: picker round is open
 let atUrlBusy = false;    // a bridge /fetch is in flight — no double-confirm
+let gitRowBusy = false;   // CRITIQUE_BRIEF_12 #1: a /git row fetch is in flight — no send
 // CRITIQUE_BRIEF_10 #8: user pressed Esc on an unconfirmed '@url:' — the token
 // is now plain text (Enter sends, space types) until the value leaves '@url:'.
 let atUrlEscaped = false;
@@ -1236,18 +1237,23 @@ async function insertGitRow(op) {
   closeCommandPopover();
   const r = atReplacePrefix(`@${op}`);
   if (!r) return;
-  const { ok, output, error } = await bridgePost('/git', { op });
-  if (!ok) {
-    showBanner(`Git failed: ${error}`, 'info');
-    return; // the '@diff' token stays for editing
+  gitRowBusy = true;
+  try {
+    const { ok, output, error } = await bridgePost('/git', { op });
+    if (!ok) {
+      showBanner(`Git failed: ${error}`, 'info');
+      return; // the '@diff' token stays for editing
+    }
+    const entry = queueAttached('git', op, output);
+    const el = els.prompt;
+    el.value = r.prefix + entry.chip + r.tail;
+    autoResizePrompt();
+    const pos = el.value.length;
+    el.setSelectionRange(pos, pos);
+    el.focus();
+  } finally {
+    gitRowBusy = false;
   }
-  const entry = queueAttached('git', op, output);
-  const el = els.prompt;
-  el.value = r.prefix + entry.chip + r.tail;
-  autoResizePrompt();
-  const pos = el.value.length;
-  el.setSelectionRange(pos, pos);
-  el.focus();
 }
 
 function insertAtFile() {
@@ -1655,7 +1661,8 @@ function updatePrefixMenu() {
     return;
   }
   if (v.startsWith('@url:') || v.startsWith('@image:') || v.startsWith('@file:') ||
-      v.startsWith('@folder:') || v.startsWith('@git:')) {
+      v.startsWith('@folder:') || v.startsWith('@git:') ||
+      v.startsWith('@diff') || v.startsWith('@staged')) {
     if (cmdPopover?.owner === 'at') closeCommandPopover();
     return;
   }
@@ -2248,6 +2255,12 @@ els.prompt.addEventListener('keydown', (e) => {
     e.preventDefault();
     atUrlEscaped = true;
   } else if (e.key === 'Enter' && !e.shiftKey) {
+    if (gitRowBusy) {
+      // CRITIQUE_BRIEF_12 #1: a /git row fetch is in flight — Enter would
+      // fall through and send the raw '@diff' literal, dropping the entry.
+      e.preventDefault();
+      return;
+    }
     if (els.prompt.value.startsWith('@url:') && !atUrlEscaped) {
       // TASK_BRIEF_10: Enter confirms an in-progress @url: instead of sending.
       e.preventDefault();
