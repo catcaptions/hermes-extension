@@ -222,9 +222,9 @@ browser-mcp.bat
   — close DevTools on that tab or pick another.
 
 **B1 scope:** status chip (green = attached, amber = no tab/incognito,
-red = bridge down), tab picker, Attach/Detach, Disconnect kill-switch,
-generic CDP relay (`{"cmd":"cdp",...}` envelope). Snapshot/click/type/screenshot
-tools are B2+.
+red = bridge down), tab picker, Attach/Detach, Reset pairing, Disconnect
+kill-switch, generic CDP relay (`{"cmd":"cdp",...}` envelope).
+Snapshot/click/type/screenshot tools are B2+.
 
 **Verification note:** `browser-mcp.py` sets `sys.dont_write_bytecode =
 True`, and `python -m py_compile` writes `__pycache__/` into the extension
@@ -241,6 +241,8 @@ afterwards (same rule as `media-bridge.py`).
 | Health OK but sessions 401 | Key mismatch between `.env` and running process — restart gateway after changing key |
 | Empty replies | Check Hermes logs; model backend may be down |
 | Local images render as path links | Run `media-bridge.bat` (or `python media-bridge.py`) and reload the panel — Edge can't load `file://` from extension pages |
+| Chip stuck red / tools return `TIMEOUT` even though the hub should be up | A shadow listener can hold the port while `browser-mcp.py` is down (e.g. the Hermes gateway binds `0.0.0.0:8644`; the extension then "connects" to the wrong peer). The extension now treats a connection as usable only after the hub's `hello-ack` — a missing ack means close + backoff, so the bridge recovers when the real hub returns. Verify with `netstat -ano \| findstr :8644` and restart `browser-mcp.bat` |
+| Extension stuck in a 4401 pairing loop (lockout) | Sidepanel → Browser → **Reset pairing** — wipes the stored token and re-pins this browser's slot with a fresh one (`rotate:true` hello) |
 
 Probe from a terminal (replace `KEY`):
 
