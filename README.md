@@ -88,15 +88,17 @@ Plus `GET /v1/health` for the connection test.
 ## Layout (no build)
 
 ```
-manifest.json       MV3 — sidePanel + storage only
-background.js       open panel on toolbar click
-sidepanel.html      shell
+manifest.json       MV3 — sidePanel + storage + debugger + tabs + alarms
+background.js       sidePanel behavior + WS client + chrome.debugger relay (B1)
+sidepanel.html      shell (+ browser chip/panel, B1)
 sidepanel.css       light ChatGPT-like theme + markdown styles
-sidepanel.js        client: SSE parser, rendering pipeline, polling, paste
+sidepanel.js        client: SSE parser, rendering pipeline, polling, paste (+ browser UI, B1)
 renderer.js         pure markdown/media/math extraction (node-testable)
 test_renderer.js    unit tests — run: node test_renderer.js
+browser-mcp.py      browser-use hub: MCP stdio server + WS listener on 8644 (B1)
 media-bridge.py     optional local media server (127.0.0.1:8643, stdlib-only)
 media-bridge.bat    launcher for media-bridge.py
+PROTOCOL.md         live-browser bridge wire protocol (B1)
 vendor/             pinned: marked 12.0.2, DOMPurify 3.1.6, KaTeX 0.16.11 (+ fonts)
 icons/              16/32/48/128
 Copy_API_Key.cmd    copies API_SERVER_KEY to clipboard
@@ -168,13 +170,60 @@ If you ever do run `python -m py_compile`, you MUST `rm -rf __pycache__` afterwa
 - Polling pauses while the panel is hidden, while settings are open, or while a stream is in progress, and never drops local messages (a 6 s post-stream grace plus a 30 s stale-limit guard a just-streamed message from blinking out).
 - Chat in the desktop app and the message appears in the panel within ~3 s, no reload needed.
 
-## Browser use — later
+## Browser use — live-browser bridge (B1)
 
-The settings checkbox is a placeholder. Plan:
+The extension can drive your **real** open tabs (actual profile, cookies,
+logins) via a local companion server — the browser-use layer (see
+`DESIGN_BROWSER_USE.md`). B1 = transport + pairing + attach UI; tools come
+in B2+.
 
-- Toggle on → include page context in the chat body
-- Driving side = Hermes companion plugin / `hermes mcp serve` + browser toolset / CDP
-- Not in v1
+How it fits together:
+
+| Piece | Role |
+|---|---|
+| `browser-mcp.py` | MCP server (stdio, for Hermes) + WebSocket hub on `ws://127.0.0.1:8644` |
+| `background.js` | extension SW: WS client, pairing token, `chrome.debugger` attach/relay |
+| sidepanel | status chip in the header + Browser section (tab picker, Attach/Detach, Disconnect) |
+
+**Setup:**
+
+```bat
+pip install fastmcp websockets
+python browser-mcp.py
+```
+
+- Keep the console window open. The hub binds loopback only.
+- Pairing token: `LIVE_BROWSER_TOKEN` env, or auto-generated at startup
+  (printed to **stderr** — stdout is the MCP protocol; `--print-token`
+  prints a copyable line). The extension generates its own token on first
+  run — you must copy the server's token into
+  `LIVE_BROWSER_TOKEN` for the server, and the extension token is read from
+  the sidepanel chip state. If either token changes, reload the extension.
+- Hermes-side registration (`~/.hermes/config.yaml` → `mcp_servers`):
+
+  ```yaml
+  mcp_servers:
+    live_browser:
+      command: "python"
+      args: ["C:\\projects\\browser-extensions\\hermes-minimal-extension\\browser-mcp.py"]
+      timeout: 120
+  ```
+
+  Tools register as `mcp_live_browser_*` (B1 ships `browser_attach_status`).
+- Wire protocol: see [PROTOCOL.md](PROTOCOL.md).
+- Debugger conflicts: a tab open in DevTools can't be attached (`TAB_BUSY`)
+  — close DevTools on that tab or pick another.
+
+**B1 scope:** status chip (green = attached, amber = no tab/incognito,
+red = bridge down), tab picker, Attach/Detach, Disconnect kill-switch,
+generic CDP relay (`{"cmd":"cdp",...}` envelope). Snapshot/click/type/screenshot
+tools are B2+.
+
+**Verification note:** `browser-mcp.py` sets `sys.dont_write_bytecode =
+True`, and `python -m py_compile` writes `__pycache__/` into the extension
+root (which Chrome/Edge refuse to load) — run compile checks with
+`PYTHONPYCACHEPREFIX` pointing outside the repo, or delete `__pycache__`
+afterwards (same rule as `media-bridge.py`).
 
 ## Troubleshooting
 
