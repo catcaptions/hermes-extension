@@ -9,6 +9,9 @@ const WS_URL = 'ws://127.0.0.1:8644';
 const RECONNECT_BACKOFF = [1000, 2000, 4000, 8000, 16000]; // ms, then capped
 const KEEPALIVE_ALARM = 'hermes-browser-keepalive';
 const TAB_BUSY_MSG = 'TAB_BUSY';
+// A gateway (or anything else) can shadow ws://127.0.0.1:8644 while
+// browser-mcp.py is down — only a hello-ack from the hub proves the peer.
+const ACK_TIMEOUT_MS = 5000;
 
 // chrome.alarms minimum period is 30 s (MV3); 20 s from the brief gets
 // clamped by Chrome anyway, so use 30 s directly.
@@ -40,6 +43,8 @@ let ws = null;
 let wsRetry = 0;
 let wsTimer = null;
 let wsEnabled = true; // false after the user hits Disconnect (kill-switch)
+let paired = false;   // true only after a successful hello-ack from the hub
+let ackTimer = null;
 
 function wsSend(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
@@ -54,6 +59,9 @@ function scheduleReconnect() {
 
 function connectWs() {
   if (!wsEnabled) return;
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    return; // an existing socket is live — never double-connect
+  }
   clearTimeout(wsTimer);
   try {
     ws = new WebSocket(WS_URL);
@@ -71,21 +79,37 @@ function connectWs() {
 
 async function onWsOpen() {
   wsRetry = 0;
-  const { liveBrowserToken } = await chrome.storage.local.get('liveBrowserToken');
-  const token = liveBrowserToken || crypto.randomUUID();
-  if (!liveBrowserToken) await chrome.storage.local.set({ liveBrowserToken: token });
+  const { liveBrowserToken, rotatePairing } = await chrome.storage.local.get([
+    'liveBrowserToken', 'rotatePairing',
+  ]);
+  const rotate = rotatePairing === true;
+  let token = liveBrowserToken;
+  if (!token || rotate) {
+    // Reset pairing: mint a fresh token; rotate:true re-pins it on the hub.
+    token = crypto.randomUUID();
+    await chrome.storage.local.set({ liveBrowserToken: token });
+  }
+  if (rotate) await chrome.storage.local.remove('rotatePairing'); // one-shot
   wsSend({
     cmd: 'hello',
     token,
     extId: chrome.runtime.id,
     version: chrome.runtime.getManifest().version,
     browser: BROWSER_NAME,
+    ...(rotate ? { rotate: true } : {}),
   });
-  broadcastBrowserState();
-  autoAttachToActiveTab('paired'); // follow the user's current tab automatically
+  // Nothing counts until the hub answers. A missing/garbage ack means the
+  // peer is NOT browser-mcp.py (gateway shadow, stale server) — close and
+  // let the backoff retry the real hub.
+  clearTimeout(ackTimer);
+  ackTimer = setTimeout(() => {
+    try { ws?.close(); } catch {}
+  }, ACK_TIMEOUT_MS);
 }
 
 function onWsClose() {
+  paired = false;
+  clearTimeout(ackTimer);
   ws = null;
   broadcastBrowserState();
   scheduleReconnect();
@@ -94,6 +118,17 @@ function onWsClose() {
 async function onWsMessage(e) {
   let msg;
   try { msg = JSON.parse(e.data); } catch { return; }
+  if (msg.cmd === 'hello-ack') {
+    clearTimeout(ackTimer);
+    if (msg.ok === true) {
+      paired = true;
+      broadcastBrowserState();
+      autoAttachToActiveTab('paired'); // follow the user's current tab
+    } else {
+      try { ws.close(); } catch {} // hub said no — back off and retry
+    }
+    return;
+  }
   if (msg.cmd === 'ping') { wsSend({ cmd: 'pong' }); return; }
   if (msg.cmd === 'cdp') await handleCdp(msg);
   else if (msg.cmd === 'status') await handleStatus(msg);
@@ -155,7 +190,7 @@ async function broadcastBrowserState() {
   const state = await getBrowserState();
   chrome.runtime.sendMessage({
     type: 'browser-state',
-    ws: ws && ws.readyState === WebSocket.OPEN ? 'connected' : 'down',
+    ws: paired ? 'connected' : 'down', // ack-gated: connected only when the hub paired us
     ...state,
   }).catch(() => {});
 }
@@ -202,7 +237,7 @@ async function clearAttached(tabId) {
 // After pairing, and on every tab switch, attach the debugger to the
 // active tab so the hub always drives the tab the user is looking at.
 async function autoAttachToActiveTab(reason) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return; // bridge down
+  if (!paired || !ws || ws.readyState !== WebSocket.OPEN) return; // bridge down
   const current = await getAttachedTabId();
   let active = null;
   try {
@@ -282,7 +317,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     getBrowserState().then(async (state) => {
       sendResponse({
         type: 'browser-state',
-        ws: ws && ws.readyState === WebSocket.OPEN ? 'connected' : 'down',
+        ws: paired ? 'connected' : 'down',
         ...state,
       });
     });
