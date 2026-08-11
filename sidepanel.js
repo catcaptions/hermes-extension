@@ -112,6 +112,7 @@ let modelPref = null;   // { provider, model } for the active session
 let serverModel = null; // { provider, model } from /api/model/options
 let modelLoading = false; // one options fetch in flight at a time
 let modelLocking = false; // one model-lock POST in flight at a time
+let modelToggleClick = false; // pill mousedown closed the picker — swallow the click
 
 // ── Storage ──────────────────────────────────────────────────────
 
@@ -872,6 +873,9 @@ function cmdDefaultRow(item) {
 
 function cmdClose() {
   if (!cmdPopover) return;
+  // CRITIQUE_BRIEF_13 #2: the model-picker outside-click listener lives only
+  // while its popover is open — every close path funnels through here.
+  document.removeEventListener('mousedown', modelPickerOutsideClick);
   const pop = cmdPopover;
   cmdPopover = null; // no dangling refs: node + listeners are GC'd with it
   pop.el.remove();
@@ -1713,11 +1717,16 @@ function updateModelPill() {
   els.btnModel.title = name ? `${name} — click to switch` : 'No model yet — click to pick';
 }
 
+// Accepts both live gateway shapes for providers[].models: plain strings
+// ("anthropic/claude-fable-5", bare "deepseek-v4-flash-free") and objects
+// ({name, id, pricing}). Same return shape either way.
 function modelItem(provider, m, payload) {
-  const name = String(m?.name || m?.id || '').trim();
+  const name = (typeof m === 'string' ? m : String(m?.name || m?.id || '')).trim();
   if (!name) return null;
-  const current = Boolean(payload && m.name === payload.model && provider.slug === payload.provider);
-  const free = /free|cheap/i.test(String(m?.pricing ?? ''));
+  const current = Boolean(payload && (typeof m === 'string' ? m === payload.model : m.name === payload.model) && provider.slug === payload.provider);
+  const free = typeof m === 'string'
+    ? /free|cheap/i.test(name)
+    : /free|cheap/i.test(String(m?.pricing ?? ''));
   const count = provider.total_models != null ? ` · ${provider.total_models}` : '';
   return {
     id: `${provider.slug}/${name}`,
@@ -1787,6 +1796,21 @@ async function openModelPicker() {
     renderItem: renderModelItem,
   });
   // cmdPopover.owner stays null: this popover's lifecycle is pill-click only.
+  document.addEventListener('mousedown', modelPickerOutsideClick);
+}
+
+// Outside-click dismissal for the model picker (owner null). Only registered
+// while that popover is open (see openModelPicker); cmdClose removes it, so
+// '/' and '@' menus never see it. Clicks inside the popover (filter, rows,
+// scrollbar) are ignored; a pill click toggles closed.
+function modelPickerOutsideClick(e) {
+  if (!cmdPopover || cmdPopover.el.contains(e.target)) return;
+  if (e.target.closest?.('#btn-model')) {
+    modelToggleClick = true; // the pill's click that follows must not reopen
+    closeCommandPopover();
+    return;
+  }
+  closeCommandPopover();
 }
 
 async function applyModel(item) {
@@ -2197,7 +2221,13 @@ els.btnSave.addEventListener('click', async () => {
   }
 });
 
-els.btnModel.addEventListener('click', () => openModelPicker());
+els.btnModel.addEventListener('click', () => {
+  if (modelToggleClick) {
+    modelToggleClick = false; // the mousedown just closed the picker — no reopen
+    return;
+  }
+  openModelPicker();
+});
 
 els.btnTest.addEventListener('click', async () => {
   // Temporarily apply form values without persisting.
