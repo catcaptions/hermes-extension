@@ -40,7 +40,7 @@ const BRIDGE_BASE = 'http://127.0.0.1:8643';
 const BRIDGE_HINT = 'local file — start media-bridge.bat, then reload the panel (see README)';
 
 // Hardcoded build stamp so the user can confirm the loaded build at a glance.
-const BUILD_STRING = 'build 2026-08-10 21e3401';
+const BUILD_STRING = 'build 2026-08-11 b1'; // placeholder — bumped to the feat hash on commit
 
 // ── DOM ──────────────────────────────────────────────────────────
 
@@ -76,6 +76,14 @@ const els = {
   previewImg: $('preview-img'),
   previewClose: $('preview-close'),
   versionBadge: $('version-badge'),
+  btnBrowser: $('btn-browser'),
+  browserDot: $('browser-dot'),
+  browserChipText: $('browser-chip-text'),
+  browserPanel: $('browser-panel'),
+  browserTabs: $('browser-tabs'),
+  btnBrowserRefresh: $('btn-browser-refresh'),
+  btnBrowserCollapse: $('btn-browser-collapse'),
+  btnBrowserDisconnect: $('btn-browser-disconnect'),
 };
 
 // ── State ────────────────────────────────────────────────────────
@@ -2351,10 +2359,175 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !els.preview.classList.contains('hidden')) closePreview();
 });
 
+// ── Browser-use B1 (TASK_BRIEF_B1) ──────────────────────────────
+// Status chip + tab picker for the live-browser bridge (background.js
+// owns the WS client and chrome.debugger; this panel is the UI).
+
+const BROWSER_TABS_THROTTLE_MS = 400;
+
+let browserState = { ws: 'down', attached: false, tab: null }; // mirror of background
+let browserTabs = [];
+let browserTabTimer = null;
+
+function browserChipClass() {
+  if (browserState.ws !== 'connected') return 'state-off';
+  if (browserState.attached) return browserState.tab?.incognito ? 'state-attn' : 'state-on';
+  return 'state-attn';
+}
+
+function renderBrowserChip() {
+  const el = els.btnBrowser;
+  el.classList.remove('state-on', 'state-attn', 'state-off');
+  el.classList.add(browserChipClass());
+  if (browserState.ws !== 'connected') {
+    els.browserChipText.textContent = '○ bridge down';
+  } else if (browserState.attached && browserState.tab) {
+    const title = browserState.tab.title || browserState.tab.url || 'tab';
+    const flag = browserState.tab.incognito ? ' (incognito)' : '';
+    els.browserChipText.textContent = `● ${browserState.browser || 'Chrome'} — "${title}"${flag}`;
+  } else {
+    els.browserChipText.textContent = '○ no tab attached';
+  }
+  els.btnBrowserDisconnect.textContent =
+    browserState.ws === 'connected' || browserState.attached ? 'Disconnect' : 'Reconnect';
+}
+
+function renderBrowserTabs() {
+  const list = els.browserTabs;
+  list.textContent = '';
+  if (browserState.ws !== 'connected') {
+    const empty = document.createElement('div');
+    empty.className = 'browser-tabs-empty';
+    empty.textContent = 'Bridge down — start browser-mcp.py, then reload the extension (see README).';
+    list.appendChild(empty);
+    return;
+  }
+  if (!browserTabs.length) {
+    const empty = document.createElement('div');
+    empty.className = 'browser-tabs-empty';
+    empty.textContent = 'No tabs';
+    list.appendChild(empty);
+    return;
+  }
+  for (const tab of browserTabs) {
+    const row = document.createElement('div');
+    row.className = 'browser-tab' + (tab.id === browserState.tab?.id ? ' attached' : '');
+    const main = document.createElement('div');
+    main.className = 'browser-tab-main';
+    const title = document.createElement('span');
+    title.className = 'browser-tab-title';
+    title.textContent = tab.title || '(untitled)';
+    const url = document.createElement('span');
+    url.className = 'browser-tab-url';
+    url.textContent = tab.url || '';
+    main.append(title, url);
+    if (tab.incognito) {
+      const badge = document.createElement('span');
+      badge.className = 'browser-tab-incognito';
+      badge.textContent = 'incognito';
+      title.appendChild(badge);
+    }
+    const act = document.createElement('button');
+    act.className = 'browser-tab-act';
+    act.type = 'button';
+    act.textContent = tab.id === browserState.tab?.id ? 'Detach' : 'Attach';
+    act.addEventListener('click', () => browserToggleTab(tab.id));
+    row.append(main, act);
+    list.appendChild(row);
+  }
+}
+
+async function browserQueryState() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'browser-get-state' });
+    if (res?.type === 'browser-state') browserState = { ...browserState, ...res };
+  } catch {
+    browserState = { ws: 'down', attached: false, tab: null };
+  }
+  renderBrowserChip();
+  renderBrowserTabs();
+}
+
+function loadBrowserTabs() {
+  clearTimeout(browserTabTimer);
+  browserTabTimer = setTimeout(async () => {
+    try {
+      browserTabs = await chrome.tabs.query({});
+    } catch {
+      browserTabs = [];
+    }
+    renderBrowserTabs();
+  }, BROWSER_TABS_THROTTLE_MS);
+}
+
+async function browserToggleTab(tabId) {
+  const attachedId = browserState.tab?.id;
+  const res = await chrome.runtime.sendMessage({
+    type: attachedId === tabId ? 'browser-detach' : 'browser-attach',
+    tabId,
+  });
+  if (res && !res.ok) {
+    showBanner(res.error === 'TAB_BUSY'
+      ? `Tab busy — close DevTools on that tab first (${res.message || ''})`
+      : `Browser: ${res.error}`, 'error');
+  }
+  await browserQueryState();
+}
+
+async function browserDisconnect() {
+  await chrome.runtime.sendMessage({ type: 'browser-disconnect' });
+  browserState = { ws: 'down', attached: false, tab: null };
+  renderBrowserChip();
+  renderBrowserTabs();
+}
+
+function browserConnect() {
+  chrome.runtime.sendMessage({ type: 'browser-connect' });
+  setTimeout(browserQueryState, 500); // let the SW reconnect, then re-read
+}
+
+function initBrowserUI() {
+  els.btnBrowser.addEventListener('click', () => {
+    const willOpen = els.browserPanel.classList.contains('hidden');
+    els.browserPanel.classList.toggle('hidden', !willOpen);
+    if (willOpen) loadBrowserTabs();
+  });
+  els.btnBrowserRefresh.addEventListener('click', () => {
+    browserQueryState();
+    loadBrowserTabs();
+  });
+  els.btnBrowserCollapse.addEventListener('click', () => {
+    els.browserPanel.classList.add('hidden');
+  });
+  els.btnBrowserDisconnect.addEventListener('click', () => {
+    if (browserState.ws === 'connected' || browserState.attached) {
+      browserDisconnect();
+    } else {
+      browserConnect();
+    }
+  });
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg?.type === 'browser-state') {
+      browserState = { ...browserState, ...msg };
+      renderBrowserChip();
+      renderBrowserTabs();
+    }
+  });
+  for (const ev of ['onCreated', 'onRemoved', 'onActivated']) {
+    chrome.tabs[ev].addListener?.(loadBrowserTabs);
+  }
+  chrome.tabs.onUpdated?.addListener((_id, info) => {
+    if (info.title !== undefined || info.url !== undefined) loadBrowserTabs();
+  });
+  browserQueryState();
+  loadBrowserTabs();
+}
+
 // ── Boot ─────────────────────────────────────────────────────────
 
 async function boot() {
   await loadSettings();
+  initBrowserUI();
   // Version badge: manifest version + hardcoded build stamp, so the user
   // can instantly confirm the loaded build (TASK_BRIEF_2 #1).
   const v = chrome?.runtime?.getManifest?.().version || '0.1.0';

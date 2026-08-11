@@ -295,6 +295,144 @@ code {
 .status.ok { color: var(--ok); }
 .status.err { color: var(--danger); }
 
+/* ── Browser-use (TASK_BRIEF_B1) ─────────────────────── */
+
+.browser-chip {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 0 8px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 999px;
+  background: var(--bg-soft);
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow: hidden;
+}
+.browser-chip:hover { background: var(--bg-hover); color: var(--text); }
+
+.browser-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+.browser-chip.state-on .browser-dot { background: var(--ok); }
+.browser-chip.state-attn .browser-dot { background: #b58900; }
+.browser-chip.state-off .browser-dot { background: var(--danger); }
+
+.browser-chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-panel {
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  padding: 6px 12px 10px;
+  flex-shrink: 0;
+  z-index: 4;
+}
+.browser-panel.hidden { display: none; }
+
+.browser-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.browser-panel-title { font-weight: 600; color: var(--text); margin-right: auto; }
+
+.browser-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  max-height: 34vh;
+  overflow-y: auto;
+}
+
+.browser-tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.browser-tab.attached { border-color: var(--ok); background: var(--bg-soft); }
+
+.browser-tab-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.browser-tab-title {
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.browser-tab-url {
+  font-size: 11px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.browser-tab-incognito {
+  font-size: 10px;
+  color: #b58900;
+  margin-left: 6px;
+  flex: none;
+}
+
+.browser-tab-act {
+  flex: none;
+  border: none;
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--bg-soft);
+  color: var(--text);
+}
+.browser-tab-act:hover { background: var(--bg-hover); }
+.browser-tab.attached .browser-tab-act { color: var(--danger); }
+
+.browser-tabs-empty {
+  padding: 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.browser-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+.danger-btn {
+  border: 1px solid var(--danger);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--danger);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 7px 16px;
+}
+.danger-btn:hover { background: var(--danger); color: #fff; }
+
 /* ── Messages ───────────────────────────────────────── */
 
 .messages {
