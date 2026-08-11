@@ -326,6 +326,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     sendResponse({ ok: true });
     return false;
   }
+  if (msg.type === 'browser-reset-pairing') {
+    resetPairing().then(sendResponse);
+    return true;
+  }
   if (msg.type === 'browser-get-state') {
     getBrowserState().then(async (state) => {
       sendResponse({
@@ -357,6 +361,21 @@ async function disconnectAll() {
   await chrome.storage.local.set({ attachedTabId: null });
   await chrome.alarms.clear(KEEPALIVE_ALARM);
   broadcastBrowserState();
+  return { ok: true };
+}
+
+async function resetPairing() {
+  // Recovery from a 4401 lockout (e.g. wiped storage or a second profile):
+  // set the one-shot rotate flag and drop the stored token — the next
+  // hello sends a fresh token with rotate:true and the hub re-pins this
+  // browser's slot. Reconnect immediately.
+  wsEnabled = true;
+  await chrome.storage.local.set({ rotatePairing: true });
+  await chrome.storage.local.remove('liveBrowserToken');
+  clearTimeout(wsTimer);
+  try { ws?.close(); } catch {}
+  ws = null;
+  connectWs();
   return { ok: true };
 }
 
