@@ -91,15 +91,34 @@ is a response. `ok: true` → `result`; `ok: false` → `error` string.
 - `event`: forwarded `chrome.debugger.onEvent` (ignored in B1; consumed from
   B2 for epoch invalidation / console / network buffers).
 - `detach`: the debugger left the tab (closed, another debugger, user
-  detach). Hub clears its attached-tab state.
+  detach, or `reason:"idle"` — the extension's idle release, see below).
+  Hub clears its attached-tab state.
 - `pong`: answers a hub `ping`.
+
+## Attach lifecycle (demand-only + idle release)
+
+Every `chrome.debugger.attach` shows Chrome's "started debugging this
+browser" banner, so the extension attaches **only on demand**:
+
+- Attach happens ONLY in response to a hub `tabs` `attach`/`activate`/`new`
+  command or an explicit sidepanel Attach click — never on pairing, tab
+  switches, or page loads. Cancelling the banner therefore sticks (no
+  silent re-attach) until the next tool call.
+- **Idle release:** while attached, the extension's keep-alive alarm also
+  checks the last hub command (`cdp`/`tabs`/`status` — heartbeats and
+  keep-alive pings do NOT count). No command for **3 min** → the
+  extension detaches and sends `{"cmd":"detach","reason":"idle"}`; the
+  banner disappears. The hub re-attaches (focused tab) on the next tool
+  call — agents should expect `STALE_REF` after an idle release and
+  re-snapshot.
 
 ## Heartbeat
 
 The hub pings every **15 s** and expects a `pong` within **10 s**; a miss
 marks the bridge down (all tools return `BRIDGE_DOWN`) and closes the
 socket. The extension's own SW keep-alive pings (chrome.alarms, 30 s while
-attached) also get a `pong` — any pong keeps the heartbeat satisfied.
+attached) also get a `pong` — any pong keeps the heartbeat satisfied. The
+same alarm enforces the idle release (see above).
 
 ## Commands
 
@@ -109,8 +128,10 @@ attached) also get a `pong` — any pong keeps the heartbeat satisfied.
 | `hello-ack` | hub → ext | handshake reply `{ok, browser, version}`; `ok:false` precedes the `4401` close; nothing else valid before a successful ack |
 | `cdp` | hub → ext | relay `method`/`params` to the attached tab; reply with CDP result/error |
 | `status` | hub → ext | reply `{attached, tab: {id,title,url,incognito}|null, debugger: "attached"|"none", browser}` |
+| `tabs` | hub → ext | tab control: `action` = `list` \| `attach` \| `detach` \| `activate` \| `new` \| `close`. `attach`/`activate`/`new` wait until `chrome.debugger.attach` succeeds (or `TAB_BUSY` / `TAB_NOT_FOUND`). Match by `tabId` or substring `url` / `title`. |
 | `ping` / `pong` | either | liveness (hub heartbeat 15 s/10 s; extension SW keep-alive; hub also pongs incoming pings) |
 | `event` | ext → hub | CDP events for the ACTIVE tab only (B1: ignored; B2: epoch/buffers) |
+| `attach` | ext → hub | debugger attached to a tab (`{tabId, tab}`) — hub resets refs/buffers |
 | `detach` | ext → hub | debugger detached from a tab (reason per chrome.debugger) |
 
 ## Error codes
@@ -124,6 +145,7 @@ attached) also get a `pong` — any pong keeps the heartbeat satisfied.
 | `TIMEOUT` | hub | no extension reply within the request budget |
 | `TAB_NOT_ATTACHED` | ext | cdp relay for a tabId that isn't the attached one |
 | `TAB_BUSY` | ext | `chrome.debugger.attach` failed — another debugger (e.g. DevTools) holds the tab |
+| `TAB_NOT_FOUND` | ext | `tabs` attach/activate could not match `tabId` / `url` / `title` |
 
 ## Flow: attach + round trip
 

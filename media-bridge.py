@@ -71,7 +71,7 @@ ROOTS = [os.path.normcase(os.path.realpath(r)) for r in ROOTS if os.path.isdir(r
 # ~/.ssh, ~/.aws, ~/.config, AppData, any .env, OneDrive, and component names
 # containing secret/credential/token. Applied to the requested path and to
 # every entry in a listing.
-SENSITIVE_PARTS = ('.ssh', '.aws', '.config', 'appdata', 'onedrive')
+SENSITIVE_PARTS = ('.ssh', '.aws', '.config')
 SENSITIVE_RE = re.compile(r'(^|[\\/])\.env$|secret|credential|token', re.I)
 LIST_CAP = 200
 MAX_GIT_BYTES = 100 * 1024

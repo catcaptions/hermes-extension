@@ -41,8 +41,9 @@ The whole extension is **vanilla HTML/CSS/JS with no build step** — the client
 | Session list + switch | ✅ |
 | Load message history | ✅ |
 | New chat | ✅ |
-| Browser-use toggle | 🔜 UI only (disabled) |
-| Model picker / tools / themes | ❌ later |
+| Model picker | ✅ |
+| Live-browser MCP bridge (drive your real tabs) | ✅ B1–B4 |
+| Themes / more tools | ❌ later |
 
 Only **4 gateway endpoints** are used:
 
@@ -89,16 +90,17 @@ Plus `GET /v1/health` for the connection test.
 
 ```
 manifest.json       MV3 — sidePanel + storage + debugger + tabs + alarms
-background.js       sidePanel behavior + WS client + chrome.debugger relay (B1)
-sidepanel.html      shell (+ browser chip/panel, B1)
+background.js       sidePanel behavior + WS client + chrome.debugger relay + tabs control
+sidepanel.html      shell (+ browser chip/panel, quick menu)
 sidepanel.css       light ChatGPT-like theme + markdown styles
-sidepanel.js        client: SSE parser, rendering pipeline, polling, paste (+ browser UI, B1)
+sidepanel.js        client: SSE parser, rendering pipeline, polling, paste (+ browser UI)
 renderer.js         pure markdown/media/math extraction (node-testable)
 test_renderer.js    unit tests — run: node test_renderer.js
-browser-mcp.py      browser-use hub: MCP stdio server + WS listener on 8644 (B1)
+test_browser_mcp.py browser-mcp unit tests — run: py -3.14 -B test_browser_mcp.py
+browser-mcp.py      browser-use hub: MCP stdio server + WS listener on 8644 (B1–B4 tools)
 media-bridge.py     optional local media server (127.0.0.1:8643, stdlib-only)
 media-bridge.bat    launcher for media-bridge.py
-PROTOCOL.md         live-browser bridge wire protocol (B1)
+PROTOCOL.md         live-browser bridge wire protocol (B1–B4)
 vendor/             pinned: marked 12.0.2, DOMPurify 3.1.6, KaTeX 0.16.11 (+ fonts)
 icons/              16/32/48/128
 Copy_API_Key.cmd    copies API_SERVER_KEY to clipboard
@@ -162,20 +164,29 @@ python -B -c "import ast; ast.parse(open('media-bridge.py', encoding='utf-8').re
 
 If you ever do run `python -m py_compile`, you MUST `rm -rf __pycache__` afterward and confirm it's gone (`ls -a | findstr /B _` must be empty).
 
-## Browser use — later
+## Live updates
 
 **Live updates** — the gateway has no push endpoint for sessions other clients wrote to, so the panel polls while it is visible and idle:
 
 - Every **3 s**, a cheap session-list request compares the active session's `message_count`; only when it changes is the full history fetched and reconciled by content fingerprint.
 - Polling pauses while the panel is hidden, while settings are open, or while a stream is in progress, and never drops local messages (a 6 s post-stream grace plus a 30 s stale-limit guard a just-streamed message from blinking out).
 - Chat in the desktop app and the message appears in the panel within ~3 s, no reload needed.
+- **Run control** (gateway `/v1/runs` API): the Send/Stop button doesn't just drop the
+  SSE stream — it POSTs `/v1/runs/{run_id}/stop` (the `run_id` rides on every stream
+  event), so the turn is genuinely cancelled server-side instead of finishing and
+  re-appearing via the poll. Panel slash commands: `/queue <msg>` (held in a queue
+  strip above the composer, auto-sent when the run finishes; sends immediately when
+  idle), `/steer <msg>` (injected into the running turn after its next tool call;
+  falls back to queue on a 409, matching the CLI), and `/stop`. These appear under
+  "Panel commands" in the `/` skills menu and win over sending on Enter.
 
-## Browser use — live-browser bridge (B1)
+## Browser use — live-browser bridge (B1–B4)
 
 The extension can drive your **real** open tabs (actual profile, cookies,
 logins) via a local companion server — the browser-use layer (see
-`DESIGN_BROWSER_USE.md`). B1 = transport + pairing + attach UI; tools come
-in B2+.
+`DESIGN_BROWSER_USE.md`). B1 = transport + pairing + attach UI; B2–B4 add
+the observe/act tools (snapshot with refs, click/type/fill, navigate,
+screenshots, console/network buffers, tab management).
 
 How it fits together:
 
@@ -183,23 +194,25 @@ How it fits together:
 |---|---|
 | `browser-mcp.py` | MCP server (stdio, for Hermes) + WebSocket hub on `ws://127.0.0.1:8644` |
 | `background.js` | extension SW: WS client, pairing token, `chrome.debugger` attach/relay |
-| sidepanel | status chip in the header + Browser section (tab picker, Attach/Detach, Disconnect) |
+| sidepanel | status chip + **agent-session card** (driving / idle / auto-release countdown), Disconnect kill switch, Advanced (manual tab attach, reset pairing) |
 
 **Setup:**
 
 ```bat
 py -3.14 -m pip install --user fastmcp websockets
-browser-mcp.bat
 ```
 
-- `browser-mcp.bat` clears `PYTHONPATH` (this machine's env points at the Hermes
-  venv, whose 3.11-built `pydantic_core` breaks Python 3.14 imports) and runs
-  `py -3.14 -u browser-mcp.py`. Keep the console window open; loopback only.
+- With the Hermes registration below, **Hermes spawns `browser-mcp.py`
+  itself** — no console window needed. `browser-mcp.bat` (clears `PYTHONPATH`,
+  which this machine's env points at the Hermes venv whose 3.11-built
+  `pydantic_core` breaks Python 3.14 imports, and runs `py -3.14 -u
+  browser-mcp.py`) is only for standalone testing without Hermes — never run
+  both at once (one hub on port 8644). Loopback only either way.
 - **Pairing is TOFU, one slot per browser**: the first extension `hello` from
   each browser (Chrome / Edge / Chromium) pins that browser's token to
   `.live-browser-token` (JSON map; legacy single-token files migrate to a `*`
   slot). A slot only re-pins on a hello carrying `rotate: true` (sidepanel
-  "Reset pairing" — not built yet, gate exists server-side). To wipe all pins:
+  "Reset pairing" — recovers a 4401 lockout). To wipe all pins:
   `browser-mcp.bat --reset-pairing`, then restart. Env `LIVE_BROWSER_TOKEN`
   pins `*` for every browser and disables TOFU.
 - Hermes-side registration (`~/.hermes/config.yaml` → `mcp_servers`):
@@ -215,17 +228,33 @@ browser-mcp.bat
       connect_timeout: 60
   ```
 
-  Tools register as `mcp__live_browser__*` (B1 ships
-  `mcp__live_browser__browser_attach_status`).
+  Tools register as `mcp_live_browser_browser_*` (Hermes namespaces MCP tools
+  `mcp_<server>_<tool>`): attach_status, attach, navigate, snapshot, find,
+  click, drag, type, fill, press, hover, scroll, select, check, uncheck,
+  back, forward, evaluate, wait, screenshot, tabs, upload_file, console,
+  network. `browser_click` also takes viewport coords (`'350,120'` — canvas,
+  charts); `browser_drag` drives sliders and drag-and-drop UIs (ref,
+  selector, or coords per endpoint); `browser_press` takes combos
+  (`ctrl+a`, `shift+tab`); `browser_scroll(target, direction)` wheel-scrolls
+  INSIDE an element's scrollable container (dropdowns, modals).
+  After config changes run `/reload-mcp` in Hermes (or restart Hermes).
 - Wire protocol: see [PROTOCOL.md](PROTOCOL.md).
 - Debugger conflicts: a tab open in DevTools can't be attached (`TAB_BUSY`)
   — close DevTools on that tab or pick another.
+- **Agent attaches tabs itself:** `browser_attach()` (focused tab),
+  `browser_tabs(action="list")` then `browser_attach(tabId=…)`, or
+  `browser_attach_status` (auto-attaches). Sidepanel picker is optional.
+- **The "started debugging this browser" banner is demand-only:** the
+  debugger attaches solely when a tool call (or a sidepanel Attach click)
+  asks for it — never on pairing, tab switches, or page loads — and it
+  auto-releases ~3 min after the last tool call (the banner disappears; the
+  next tool call re-attaches the focused tab). Hitting Cancel on the banner
+  therefore sticks until the next tool call instead of being undone
+  instantly. Protocol detail: [PROTOCOL.md](PROTOCOL.md) "Attach lifecycle".
 
-**B1 scope:** status chip (green = attached, amber = no tab/incognito,
-red = bridge down), tab picker, Attach/Detach, Reset pairing, Disconnect
-kill-switch, generic CDP relay (`{"cmd":"cdp",...}` envelope).
-Snapshot/click/type/screenshot tools are B2+.
-
+**Scope:** CDP observe/act surface (snapshot, click/drag/type/fill, scroll,
+navigate, tabs attach, screenshot, upload_file, console/network) over the
+extension debugger bridge.
 **Verification note:** `browser-mcp.py` sets `sys.dont_write_bytecode =
 True`, and `python -m py_compile` writes `__pycache__/` into the extension
 root (which Chrome/Edge refuse to load) — run compile checks with

@@ -9,7 +9,6 @@ const DEFAULTS = {
   apiKey: '',
   sessionId: '',
   sessionTitle: 'New chat',
-  browserUse: false, // UI only in v1
 };
 
 // Live updates: cheap polling while the panel is visible and idle.
@@ -40,7 +39,7 @@ const BRIDGE_BASE = 'http://127.0.0.1:8643';
 const BRIDGE_HINT = 'local file — start media-bridge.bat, then reload the panel (see README)';
 
 // Hardcoded build stamp so the user can confirm the loaded build at a glance.
-const BUILD_STRING = 'build 2026-08-11 33f74e0';
+const BUILD_STRING = 'build 2026-08-16 run-control';
 
 // ── DOM ──────────────────────────────────────────────────────────
 
@@ -54,7 +53,6 @@ const els = {
   settingsStatus: $('settings-status'),
   cfgUrl: $('cfg-url'),
   cfgKey: $('cfg-key'),
-  cfgBrowserUse: $('cfg-browser-use'),
   messages: $('messages'),
   emptyState: $('empty-state'),
   banner: $('banner'),
@@ -72,6 +70,7 @@ const els = {
   btnTest: $('btn-test'),
   btnRefreshSessions: $('btn-refresh-sessions'),
   attachStrip: $('attach-strip'),
+  queueStrip: $('queue-strip'),
   preview: $('preview'),
   previewImg: $('preview-img'),
   previewClose: $('preview-close'),
@@ -80,11 +79,19 @@ const els = {
   browserDot: $('browser-dot'),
   browserChipText: $('browser-chip-text'),
   browserPanel: $('browser-panel'),
+  browserStatus: $('browser-status'),
   browserTabs: $('browser-tabs'),
+  browserAdvanced: $('browser-advanced'),
+  btnBrowserAdvanced: $('btn-browser-advanced'),
   btnBrowserRefresh: $('btn-browser-refresh'),
   btnBrowserCollapse: $('btn-browser-collapse'),
   btnBrowserDisconnect: $('btn-browser-disconnect'),
   btnBrowserResetPairing: $('btn-browser-reset-pairing'),
+  quickMenu: $('quick-menu'),
+  btnMenu: $('btn-menu'),
+  btnBrowserMenu: $('btn-browser-menu'),
+  btnAttach: $('btn-attach'),
+  attachInput: $('attach-input'),
 };
 
 // ── State ────────────────────────────────────────────────────────
@@ -122,6 +129,10 @@ let serverModel = null; // { provider, model } from /api/model/options
 let modelLoading = false; // one options fetch in flight at a time
 let modelLocking = false; // one model-lock POST in flight at a time
 let modelToggleClick = false; // pill mousedown closed the picker — swallow the click
+let activeRunId = null;       // gateway run_id of the stream we're attached to (SSE events carry it)
+const queuedTurns = [];       // /queue holds messages here until the current run finishes
+let promptHistoryIndex = -1;
+let promptHistoryDraft = '';
 
 // ── Storage ──────────────────────────────────────────────────────
 
@@ -131,7 +142,6 @@ async function loadSettings() {
   activeSessionId = settings.sessionId || '';
   els.cfgUrl.value = settings.gatewayUrl || DEFAULTS.gatewayUrl;
   els.cfgKey.value = settings.apiKey || '';
-  els.cfgBrowserUse.checked = Boolean(settings.browserUse);
   els.sessionTitle.textContent = settings.sessionTitle || 'New chat';
 }
 
@@ -226,6 +236,108 @@ async function getMessages(sessionId) {
   return rows(payload).map(normalizeMessage).filter(Boolean);
 }
 
+function pickFirst(obj, keys) {
+  for (const k of keys) {
+    const v = obj?.[k];
+    if (v != null && String(v).trim() !== '') return v;
+  }
+  return null;
+}
+
+function coerceThought(row) {
+  const v = pickFirst(row, ['thought', 'reasoning', 'thinking']);
+  if (v == null) return '';
+  return String(v).trim();
+}
+
+function extractCommandFromTool(t) {
+  const raw = t && typeof t === 'object' ? t : {};
+  const direct = raw.command ?? raw.cmd ?? raw.code ?? raw.script;
+  if (typeof direct === 'string' && direct.trim()) return direct.trim();
+  if (typeof direct === 'object' && direct != null) {
+    const v = direct.command ?? direct.cmd ?? direct.code ?? direct.script ?? '';
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  const containers = [raw.input, raw.args, raw.arguments, raw.params, raw.tool_input, raw.toolInput, raw.parameters];
+  for (const c of containers) {
+    if (c == null) continue;
+    if (typeof c === 'string') {
+      const s = c.trim();
+      if (!s) continue;
+      if ((s.startsWith('{') && s.endsWith('}')) || (s.startsWith('[') && s.endsWith(']'))) {
+        try { const p = JSON.parse(s); const v = p.command ?? p.cmd ?? p.code ?? p.script ?? p.text ?? p.content ?? ''; if (typeof v === 'string' && v.trim()) return v.trim(); } catch {}
+      }
+      return s;
+    }
+    if (typeof c === 'object') {
+      const v = c.command ?? c.cmd ?? c.code ?? c.script ?? c.text ?? c.content ?? c.query ?? '';
+      if (typeof v === 'string' && v.trim()) return v.trim();
+      if (Array.isArray(c.commands) && c.commands.length) return c.commands.join(' ; ').trim();
+      if (Array.isArray(c) && c.length && typeof c[0] === 'string') return c.join(' ; ').trim();
+    }
+  }
+  const fallback = raw.content ?? raw.text ?? raw.query ?? '';
+  if (typeof fallback === 'string' && fallback.trim()) return fallback.trim();
+  return '';
+}
+
+function coerceTools(row) {
+  const raw = row?.tools ?? row?.tool_calls ?? row?.toolCalls ?? row?.tool_results ?? row?.toolResults;
+  if (!Array.isArray(raw)) return [];
+  return raw.map((t) => {
+    if (typeof t === 'string') return { name: t, label: '', status: 'done', input: '', output: '' };
+    if (!t || typeof t !== 'object') return null;
+    const name = extractToolName(t, 'tool');
+    const lcName = name.toLowerCase();
+    if (lcName === '_thinking' || lcName === 'thinking' || lcName === 'reasoning') return null;
+    const output = t.output ?? t.result ?? t.content ?? t.observation ?? t.stdout ?? t.stderr ?? '';
+    const outputStr = toDisplayString(output, 4000);
+    const hasOutput = Boolean(String(outputStr).trim());
+    let status = String(t.status || (t.error ? 'error' : hasOutput ? 'done' : 'running')).toLowerCase();
+    if (!hasOutput && !t.error && status === 'done') status = 'running';
+    const inputRaw = t.input ?? t.args ?? t.arguments ?? t.params ?? '';
+    const isTerminal = lcName === 'terminal' || String(t.tool || '').toLowerCase().includes('terminal');
+    const cmd = isTerminal ? extractCommandFromTool(t) : '';
+    const labelSrc = isTerminal ? (cmd || toDisplayString(inputRaw, 500)) : String(t.label ?? t.title ?? t.summary ?? t.description ?? '').trim();
+    const label = (labelSrc || (isTerminal ? summarizeCommand(cmd) : '') || toDisplayString(inputRaw, 300)).trim().slice(0, 500) || (isTerminal && cmd ? summarizeCommand(cmd) : '');
+    const displayName = isTerminal ? 'terminal' : name;
+    const displayLabel = isTerminal ? (cmd ? summarizeCommand(cmd) : label) : label;
+    if (isTerminal && !cmd && !displayLabel) return null;
+    return { name: displayName, label: displayLabel, status: ['running', 'done', 'error'].includes(status) ? status : 'running', input: (isTerminal && cmd ? cmd : toDisplayString(inputRaw, 800)), output: outputStr };
+  }).filter(Boolean).slice(0, 20);
+}
+
+function coerceDiffs(row) {
+  const raw = row?.diffs ?? row?.file_changes ?? row?.fileChanges ?? row?.patches;
+  if (!Array.isArray(raw)) {
+    const single = row?.patch ?? row?.diff;
+    if (typeof single === 'string' && single.trim()) return [{ path: String(row?.path || row?.file || 'patch'), patch: single.slice(0, 8000) }];
+    return [];
+  }
+  return raw.map((d) => {
+    if (typeof d === 'string') return { path: 'patch', patch: d.slice(0, 8000) };
+    if (!d || typeof d !== 'object') return null;
+    const path = String(d.path || d.file || d.filename || 'patch');
+    const patch = String(d.patch || d.diff || d.content || d.hunk || '').slice(0, 8000);
+    if (!patch.trim()) return null;
+    return { path, patch };
+  }).filter(Boolean).slice(0, 10);
+}
+
+function coerceSkills(row) {
+  const raw = row?.skills ?? row?.skill_calls ?? row?.skillCalls;
+  if (!Array.isArray(raw)) {
+    const single = row?.skill ?? row?.skill_name ?? row?.skillName;
+    if (typeof single === 'string' && single.trim()) return [{ name: single.trim() }];
+    return [];
+  }
+  return raw.map((s) => {
+    if (typeof s === 'string') return { name: s };
+    if (!s || typeof s !== 'object') return null;
+    return { name: String(s.name || s.skill || s.id || '').trim() || 'skill' };
+  }).filter((s) => s && s.name).slice(0, 10);
+}
+
 function normalizeMessage(row) {
   if (!row || typeof row !== 'object') return null;
   const role = String(row.role || row.sender || '').toLowerCase();
@@ -238,8 +350,19 @@ function normalizeMessage(row) {
       .join('\n');
   }
   content = String(content || '').trim();
-  if (!content && role !== 'assistant') return null;
-  return { role: role === 'system' ? 'assistant' : role, content };
+  const thought = coerceThought(row);
+  const tools = coerceTools(row);
+  const diffs = coerceDiffs(row);
+  const skills = coerceSkills(row);
+  const hasActivity = Boolean(thought || tools.length || diffs.length || skills.length);
+  if (!content && role !== 'assistant' && !hasActivity) return null;
+  if (!content && role === 'assistant' && !hasActivity) return { role: 'assistant', content: '' };
+  const msg = { role: role === 'system' ? 'assistant' : role, content };
+  if (thought) msg.thought = thought;
+  if (tools.length) msg.tools = tools;
+  if (diffs.length) msg.diffs = diffs;
+  if (skills.length) msg.skills = skills;
+  return msg;
 }
 
 async function testConnection() {
@@ -271,6 +394,183 @@ function parseSseBlock(block = '') {
   return event;
 }
 
+// ── Activity model (Phase 1-3): SSE thought/tool/skill/diff → rich msg ──
+
+function ensureActivity(msg) {
+  if (!msg._activity) msg._activity = { thought: '', thoughtDone: false, tools: [], skills: [], diffs: [], unknown: [] };
+  return msg._activity;
+}
+
+function pushTool(activity, entry) {
+  const tools = activity.tools;
+  const key = entry.id || entry.name || entry.type || '';
+  if (key) {
+    const existing = tools.find((t) => (t.id && t.id === entry.id) || (t.name && t.name === entry.name && t.status === 'running'));
+    if (existing) {
+      for (const k of ['name', 'label', 'type', 'status', 'input', 'output']) {
+        const v = entry[k];
+        if (v != null && String(v).trim() !== '') existing[k] = v;
+        else if (k === 'status' && v) existing[k] = v;
+      }
+      if (entry.id) existing.id = entry.id;
+      return;
+    }
+  }
+  tools.push(entry);
+  if (tools.length > 24) tools.shift();
+}
+
+function summarizeCommand(cmd) {
+  const s = String(cmd || '').trim();
+  if (!s) return '';
+  const parts = s.split(/\n|;\s*/).map((p) => p.trim()).filter(Boolean);
+  if (parts.length <= 1) return s.slice(0, 120);
+  const first = parts[0].slice(0, 80);
+  return `${first} + ${parts.length - 1} command${parts.length - 1 === 1 ? '' : 's'}`;
+}
+
+function toDisplayString(v, cap = 800) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v.slice(0, cap);
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v).slice(0, cap);
+  try { return JSON.stringify(v).slice(0, cap); } catch { return String(v).slice(0, cap); }
+}
+
+function extractToolName(raw, fallback) {
+  const cand = raw.name ?? raw.tool ?? raw.function ?? raw.tool_name ?? raw.id;
+  if (typeof cand === 'string' && cand.trim()) return cand.trim().slice(0, 80);
+  if (cand && typeof cand === 'object') {
+    const inner = cand.name ?? cand.tool ?? cand.id ?? cand.label ?? '';
+    if (typeof inner === 'string' && inner.trim()) return inner.trim().slice(0, 80);
+  }
+  return String(fallback || 'tool').slice(0, 80);
+}
+
+function ingestActivityEvent(msg, type, data) {
+  const t = String(type || '').toLowerCase();
+  if (!t || ['assistant.delta', 'assistant.completed', 'run.completed', 'run.started', 'message.started', 'message.completed', 'message.delta'].includes(t)) return false;
+  if (t.startsWith('message.')) return false;
+  if (t === 'error') return false;
+  const activity = ensureActivity(msg);
+  const raw = data && typeof data === 'object' ? data : {};
+  const rawToolName = String(extractToolName(raw, '') || raw.tool || raw.name || '').toLowerCase();
+  const isThinkingTool = rawToolName === '_thinking' || rawToolName === 'thinking' || rawToolName === 'reasoning';
+  if (t.includes('thought') || t.includes('reasoning') || t.includes('thinking') || isThinkingTool) {
+    const delta = raw.delta ?? raw.content ?? raw.text ?? raw.thought ?? raw.input ?? raw.args ?? raw.output ?? '';
+    const s = toDisplayString(delta, 6000);
+    if (s && s !== '{}' && s !== '""') activity.thought += s;
+    else if (rawToolName === '_thinking' && raw.input) {
+      const alt = toDisplayString(raw.input, 6000);
+      if (alt) activity.thought += alt;
+    }
+    if (t.includes('completed') || raw.done || raw.completed) activity.thoughtDone = true;
+    return true;
+  }
+  if (t.includes('skill')) {
+    const name = toDisplayString(raw.name ?? raw.skill ?? raw.id ?? raw.label ?? '', 80).trim() || 'skill';
+    if (!activity.skills.find((s) => s.name === name)) activity.skills.push({ name });
+    return true;
+  }
+  const patchLike = raw.patch ?? raw.diff;
+  const isDiffType = t.includes('diff') || t.includes('patch') || t.includes('file') || t.includes('edit') || t.includes('write') || t === 'document' || t === 'file_change';
+  const hasPatchField = typeof patchLike === 'string' && patchLike.trim();
+  const isFilePayload = raw.path || raw.file || raw.filename;
+  if (isDiffType || hasPatchField) {
+    if (hasPatchField) {
+      activity.diffs.push({ path: toDisplayString(raw.path ?? raw.file ?? raw.filename ?? raw.name ?? 'patch', 200), patch: patchLike.slice(0, 8000) });
+      if (activity.diffs.length > 10) activity.diffs.shift();
+      if (isDiffType) return true;
+    }
+    if (isFilePayload && !hasPatchField) {
+      const label = toDisplayString(raw.path ?? raw.file ?? raw.filename ?? '', 400).trim();
+      const preview = toDisplayString(raw.preview ?? raw.content ?? raw.observation ?? '', 2000);
+      const name = t.includes('read') ? `Read ${label}` : `File ${label}`;
+      pushTool(activity, { id: raw.id ? String(raw.id) : '', name: name.slice(0, 120), label, type: t, status: 'done', input: label.slice(0, 400), output: preview.slice(0, 2000) });
+      return true;
+    }
+    if (hasPatchField) return true;
+  }
+  if (hasPatchField) {
+    activity.diffs.push({ path: toDisplayString(raw.path ?? raw.file ?? 'patch', 200), patch: String(patchLike).slice(0, 8000) });
+    if (activity.diffs.length > 10) activity.diffs.shift();
+    return true;
+  }
+  const nestedCmd = (() => {
+    const direct = raw.command ?? raw.cmd ?? raw.code ?? raw.script;
+    if (typeof direct === 'string' && direct.trim()) return direct.trim();
+    const containers = [raw.input, raw.args, raw.arguments, raw.params, raw.tool_input, raw.toolInput, raw.parameters];
+    for (const c of containers) {
+      if (!c) continue;
+      if (typeof c === 'string') {
+        const s = c.trim();
+        if (!s) continue;
+        if ((s.startsWith('{') && s.endsWith('}')) || (s.startsWith('[') && s.endsWith(']'))) {
+          try { const p = JSON.parse(s); const v = p.command ?? p.cmd ?? p.code ?? p.script ?? p.text ?? p.content ?? ''; if (typeof v === 'string' && v.trim()) return v.trim(); } catch {}
+        }
+        return s;
+      }
+      if (typeof c === 'object') {
+        const v = c.command ?? c.cmd ?? c.code ?? c.script ?? c.text ?? c.content ?? c.query ?? '';
+        if (typeof v === 'string' && v.trim()) return v.trim();
+        if (Array.isArray(c.commands) && c.commands.length) return c.commands.join(' ; ').trim();
+        if (Array.isArray(c) && c.length && typeof c[0] === 'string') return c.join(' ; ').trim();
+      }
+    }
+    const fallback = raw.content ?? raw.text ?? raw.query ?? raw.input_text ?? raw.command_text;
+    if (typeof fallback === 'string' && fallback.trim()) return fallback.trim();
+    return '';
+  })();
+  const isTerminal = t.includes('terminal') || String(raw.tool || '').toLowerCase().includes('terminal') || String(extractToolName(raw, '')).toLowerCase() === 'terminal' || String(raw.name || '').toLowerCase() === 'terminal';
+  if (t.includes('command') || t.includes('shell') || t.includes('bash') || t.includes('exec') || isTerminal || raw.command || raw.cmd || nestedCmd) {
+    const cmd = (nestedCmd || toDisplayString(raw.command ?? raw.cmd ?? raw.input ?? raw.args ?? '', 600).trim() || t).trim();
+    const output = toDisplayString(raw.output ?? raw.result ?? raw.content ?? raw.observation ?? raw.stdout ?? raw.stderr ?? '', 4000);
+    const shortCmd = cmd.length > 80 ? `${cmd.slice(0, 77)}…` : cmd;
+    const label = isTerminal ? shortCmd : (cmd.length > 80 ? `Run: ${cmd.slice(0, 77)}…` : `Run: ${cmd}`);
+    const name = isTerminal ? 'terminal' : label;
+    const cmdLabel = isTerminal ? shortCmd : cmd;
+    pushTool(activity, { id: raw.id ? String(raw.id) : '', name, label: cmdLabel, type: t, status: raw.error ? 'error' : 'done', input: cmd.slice(0, 800), output });
+    return true;
+  }
+  if (isThinkingTool) return true;
+  if (t.includes('tool') || t.includes('hermes.tool') || t.includes('progress') || raw.tool || raw.tool_call || raw.function) {
+    if (isThinkingTool) return true;
+    const name = extractToolName(raw, t);
+    if (name.toLowerCase() === '_thinking' || name.toLowerCase() === 'thinking') return true;
+    const labelRaw = raw.label ?? raw.title ?? raw.summary ?? raw.description ?? raw.detail ?? nestedCmd ?? '';
+    const label = toDisplayString(labelRaw, 500).trim();
+    const status = String(raw.status || (raw.error ? 'error' : raw.output || raw.result ? 'done' : t.includes('progress') ? 'running' : 'running')).toLowerCase();
+    const entry = {
+      id: raw.id ? String(raw.id) : '',
+      name,
+      label: label || '',
+      type: t,
+      status: ['running', 'done', 'error'].includes(status) ? status : 'running',
+      input: raw.input ?? raw.args ?? raw.arguments ?? raw.params ?? nestedCmd ?? '',
+      output: raw.output ?? raw.result ?? raw.content ?? raw.observation ?? '',
+    };
+    entry.input = toDisplayString(entry.input, 800);
+    entry.output = toDisplayString(entry.output, 4000);
+    if (!entry.label && entry.input) entry.label = entry.input.slice(0, 300);
+    if (!entry.label && nestedCmd) entry.label = nestedCmd.slice(0, 300);
+    if (!entry.label) entry.label = summarizeCommand(nestedCmd || entry.input || '');
+    pushTool(activity, entry);
+    const patch2 = raw.patch ?? raw.diff;
+    if (typeof patch2 === 'string' && patch2.trim()) {
+      activity.diffs.push({ path: toDisplayString(raw.path ?? raw.file ?? name, 200), patch: patch2.slice(0, 8000) });
+      if (activity.diffs.length > 10) activity.diffs.shift();
+    }
+    return true;
+  }
+  try {
+    const preview = JSON.stringify(raw).slice(0, 600);
+    activity.unknown.push({ type: String(type), preview });
+    if (activity.unknown.length > 12) activity.unknown.shift();
+  } catch {
+    activity.unknown.push({ type: String(type), preview: toDisplayString(raw, 600) });
+  }
+  return true;
+}
+
 function reduceAssistantText(state, type, data) {
   const current = { text: String(state.text || ''), finalized: Boolean(state.finalized) };
   if (type === 'assistant.delta' && data.delta && !current.finalized) {
@@ -292,7 +592,7 @@ function reduceAssistantText(state, type, data) {
   return current;
 }
 
-async function readHermesSse(response, { onAssistant, signal } = {}) {
+async function readHermesSse(response, { onAssistant, onEvent, signal } = {}) {
   if (!response?.body) throw new Error('Stream returned no body.');
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -302,6 +602,7 @@ async function readHermesSse(response, { onAssistant, signal } = {}) {
   const processBlock = (block) => {
     const event = parseSseBlock(block);
     const data = event.json || {};
+    onEvent?.(event.type, data); // every event carries run_id — stop/steer need it
     if (['assistant.delta', 'assistant.completed', 'run.completed'].includes(event.type)) {
       stream = reduceAssistantText(stream, event.type, data);
       onAssistant?.(stream.text, { finalized: stream.finalized, event: event.type });
@@ -362,19 +663,20 @@ function setSending(on) {
   sending = on;
   if (!on) updateRunningIndicator();
   els.btnSend.classList.toggle('busy', on);
-  // While streaming: button becomes Stop (still enabled). Otherwise: Send.
   if (on) {
-    els.btnSend.disabled = false;
-    els.btnSend.title = 'Stop';
-    els.btnSend.setAttribute('aria-label', 'Stop');
-    els.prompt.disabled = true;
+    els.prompt.disabled = false;
     els.btnModel.disabled = true; // CRITIQUE_BRIEF_11 #7: no model switch mid-stream
+    els.prompt.placeholder = 'Steer the agent…';
     setConnection('busy', 'Hermes is working…');
+    updateSendDisabled();
+    els.prompt.focus();
   } else {
-    els.btnSend.title = 'Send';
-    els.btnSend.setAttribute('aria-label', 'Send');
+    els.prompt.placeholder = 'Do anything';
     els.prompt.disabled = false;
     els.btnModel.disabled = false;
+    els.btnSend.classList.remove('steer-ready');
+    els.btnSend.title = 'Send';
+    els.btnSend.setAttribute('aria-label', 'Send');
     updateSendDisabled();
   }
 }
@@ -384,6 +686,35 @@ function autoResizePrompt() {
   el.style.height = 'auto';
   el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
   updateSendDisabled();
+}
+
+function promptHistory() {
+  return messages
+    .filter((msg) => msg.role === 'user' && msg.content)
+    .map((msg) => String(msg.content));
+}
+
+function navigatePromptHistory(direction) {
+  const history = promptHistory();
+  if (!history.length) return false;
+  if (promptHistoryIndex === -1) promptHistoryDraft = els.prompt.value;
+  const next = Math.max(-1, Math.min(history.length - 1, promptHistoryIndex + direction));
+  if (next === promptHistoryIndex) return true;
+  promptHistoryIndex = next;
+  const value = next === -1 ? promptHistoryDraft : history[history.length - 1 - next];
+  setPromptValue(value);
+  return true;
+}
+
+// Shared tail of every chip/token insertion: set the prompt value (when
+// given), resize, park the caret (default: end), keep focus in the composer.
+function setPromptValue(value, caretPos) {
+  const el = els.prompt;
+  if (value !== undefined) el.value = value;
+  autoResizePrompt();
+  el.focus();
+  const pos = caretPos ?? el.value.length;
+  el.setSelectionRange(pos, pos);
 }
 
 function escapeHtml(s) {
@@ -398,7 +729,19 @@ function escapeHtml(s) {
 
 function updateSendDisabled() {
   const hasText = Boolean(els.prompt.value.trim());
-  els.btnSend.disabled = sending || (!hasText && attachments.length === 0) || !settings.apiKey;
+  const hasPending = attachments.length > 0 || attachedContext.length > 0;
+  if (sending) {
+    const steerReady = hasText || hasPending;
+    els.btnSend.disabled = !settings.apiKey;
+    els.btnSend.classList.toggle('steer-ready', steerReady);
+    els.btnSend.title = steerReady ? 'Steer — inject into the current run' : 'Stop — cancel the current run';
+    els.btnSend.setAttribute('aria-label', steerReady ? 'Steer' : 'Stop');
+    return;
+  }
+  els.btnSend.classList.remove('steer-ready');
+  els.btnSend.title = 'Send';
+  els.btnSend.setAttribute('aria-label', 'Send');
+  els.btnSend.disabled = (!hasText && !hasPending) || !settings.apiKey;
 }
 
 function renderChips() {
@@ -487,17 +830,23 @@ function addAttachment(file, dataUrl) {
 
 // Send-time encode: ≤PASTE_MAX_SIDE px, JPEG q0.80 (PNG for alpha-capable
 // sources) — small blobs, small args.
-async function encodeForSend(dataUrl) {
-  const img = await loadImageEl(dataUrl);
-  const mime = /^data:(image\/\w+);/i.exec(dataUrl)?.[1] || 'image/png';
-  const scale = Math.min(1, PASTE_MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+function drawScaledDataUrl(img, maxSide, mime, q) {
+  const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
   const w = Math.max(1, Math.round(img.naturalWidth * scale));
   const h = Math.max(1, Math.round(img.naturalHeight * scale));
   const c = document.createElement('canvas');
   c.width = w;
   c.height = h;
   c.getContext('2d').drawImage(img, 0, 0, w, h);
-  return mime === 'image/jpeg' ? c.toDataURL('image/jpeg', 0.8) : c.toDataURL('image/png');
+  return c.toDataURL(mime, q);
+}
+
+async function encodeForSend(dataUrl) {
+  const img = await loadImageEl(dataUrl);
+  const mime = /^data:(image\/\w+);/i.exec(dataUrl)?.[1] || 'image/png';
+  return mime === 'image/jpeg'
+    ? drawScaledDataUrl(img, PASTE_MAX_SIDE, 'image/jpeg', 0.8)
+    : drawScaledDataUrl(img, PASTE_MAX_SIDE, 'image/png');
 }
 
 function dataUrlToBlob(dataUrl) {
@@ -538,14 +887,7 @@ async function cappedDataUrl(dataUrl) {
   if (String(dataUrl).length <= DATA_URL_CAP_BYTES) return dataUrl;
   try {
     const img = await loadImageEl(dataUrl);
-    const scale = Math.min(1, 640 / Math.max(img.naturalWidth, img.naturalHeight));
-    const w = Math.max(1, Math.round(img.naturalWidth * scale));
-    const h = Math.max(1, Math.round(img.naturalHeight * scale));
-    const c = document.createElement('canvas');
-    c.width = w;
-    c.height = h;
-    c.getContext('2d').drawImage(img, 0, 0, w, h);
-    return c.toDataURL('image/jpeg', 0.6);
+    return drawScaledDataUrl(img, 640, 'image/jpeg', 0.6);
   } catch {
     return dataUrl;
   }
@@ -739,6 +1081,129 @@ function attachMediaFallbacks(scope, msg) {
   }
 }
 
+function getActivity(msg) {
+  if (msg._activity) return msg._activity;
+  const hasHist = Boolean(msg.thought || msg.tools || msg.diffs || msg.skills);
+  if (!hasHist) return null;
+  const a = ensureActivity(msg);
+  if (msg.thought) a.thought = String(msg.thought);
+  if (Array.isArray(msg.tools) && msg.tools.length) a.tools = msg.tools.map((t) => ({ name: toDisplayString(t.name || 'tool', 80), label: toDisplayString(t.label || '', 500), status: t.status || 'done', input: toDisplayString(t.input || '', 800), output: toDisplayString(t.output || '', 4000) }));
+  if (Array.isArray(msg.diffs) && msg.diffs.length) a.diffs = msg.diffs.map((d) => ({ path: String(d.path || 'patch'), patch: String(d.patch || '').slice(0, 8000) }));
+  if (Array.isArray(msg.skills) && msg.skills.length) a.skills = msg.skills.map((s) => ({ name: String(s.name || s) }));
+  return a;
+}
+
+function renderActivityBlocks(msg) {
+  const el = msg._el;
+  if (!el || msg.role !== 'assistant') return;
+  let host = el.querySelector('.hm-activity');
+  if (!host) {
+    host = document.createElement('div');
+    host.className = 'hm-activity';
+    const body = el.querySelector('.msg-body');
+    if (body) el.insertBefore(host, body);
+    else el.appendChild(host);
+  }
+  const activity = getActivity(msg) || msg._activity;
+  if (!activity) { host.innerHTML = ''; host.style.display = 'none'; return; }
+  const thought = String(activity.thought || '').trim();
+  const hasThought = Boolean(thought);
+  const hasTools = Array.isArray(activity.tools) && activity.tools.length > 0;
+  const hasDiffs = Array.isArray(activity.diffs) && activity.diffs.length > 0;
+  const hasSkills = Array.isArray(activity.skills) && activity.skills.length > 0;
+  const hasUnknown = Array.isArray(activity.unknown) && activity.unknown.length > 0;
+  if (!hasThought && !hasTools && !hasDiffs && !hasSkills && !hasUnknown) { host.innerHTML = ''; host.style.display = 'none'; return; }
+  host.style.display = '';
+  const actionItems = [];
+  if (hasThought) {
+    const label = thought.replace(/\s+/g, ' ').slice(0, 100);
+    actionItems.push({ kind: 'thought', label, full: thought });
+  }
+  if (hasTools) {
+    for (const t of activity.tools) {
+      const dot = t.status === 'running' ? 'running' : t.status === 'error' ? 'error' : 'done';
+      const title = String(t.name || 'tool').slice(0, 80);
+      const detail = (String(t.label || '').trim() || String(t.input || '').trim()).slice(0, 400);
+      const output = String(t.output || '').trim();
+      const label = detail || t.type || '';
+      actionItems.push({ kind: 'tool', title, label, dot, output });
+    }
+  }
+  if (hasDiffs) {
+    for (const d of activity.diffs) {
+      actionItems.push({ kind: 'diff', title: String(d.path || 'patch').slice(0, 160), patch: String(d.patch || '') });
+    }
+  }
+  if (hasSkills) {
+    for (const s of activity.skills) actionItems.push({ kind: 'skill', title: String(s.name || s).slice(0, 60) });
+  }
+  if (hasUnknown) {
+    for (const u of activity.unknown.slice(-6)) actionItems.push({ kind: 'unknown', title: String(u.type).slice(0, 80), label: String(u.preview || '').trim().slice(0, 400) });
+  }
+  if (!actionItems.length) { host.innerHTML = ''; host.style.display = 'none'; return; }
+  const preview = actionItems.slice(0, 2).map((it) => {
+    if (it.kind === 'thought') return `Thought › ${it.label.slice(0, 60)}`;
+    if (it.kind === 'tool') return `${it.title} — ${it.label.slice(0, 50)}`;
+    if (it.kind === 'diff') return `Diff: ${it.title}`;
+    if (it.kind === 'skill') return `Skill: ${it.title}`;
+    return it.title;
+  }).join(' · ').slice(0, 120);
+  const count = actionItems.length;
+  const summaryLabel = count === 1 ? actionItems[0].kind === 'thought' ? 'Thought' : actionItems[0].title || 'Action' : `Actions · ${count}`;
+  const collapsed = msg._actionsOpen !== true;
+  const rowsHtml = actionItems.map((it, idx) => {
+    if (it.kind === 'thought') {
+      const short = it.label.replace(/\s+/g, ' ').slice(0, 120);
+      const expanded = it.full.length > 120 || it.full.includes('\n');
+      if (!expanded) return `<div class="hm-action-row"><span class="hm-tool-dot done"></span><span class="hm-action-title">Thought</span><span class="hm-action-sub">${escapeHtml(short)}</span></div>`;
+      return `<div class="hm-action-row"><span class="hm-tool-dot done"></span><span class="hm-action-title">Thought</span><span class="hm-action-sub">${escapeHtml(short)}…</span></div><div class="hm-action-detail" style="padding-left:18px;white-space:pre-wrap;word-break:break-word;font-size:12px;color:var(--text-muted);">${escapeHtml(it.full.slice(0, 4000))}</div>`;
+    }
+    if (it.kind === 'tool') {
+      const sub = it.label ? ` <span class="hm-action-sub">${escapeHtml(it.label.slice(0, 300))}</span>` : '';
+      const detail = it.output ? `<div class="hm-action-detail" style="padding-left:18px;white-space:pre-wrap;word-break:break-word;font-size:12px;color:var(--text-muted);max-height:160px;overflow:auto;">${escapeHtml(it.output.slice(0, 4000))}</div>` : '';
+      return `<div class="hm-action-row"><span class="hm-tool-dot ${it.dot}"></span><span class="hm-action-title">${escapeHtml(it.title)}</span>${sub}</div>${detail}`;
+    }
+    if (it.kind === 'diff') {
+      const rawLines = it.patch.split('\n');
+      const clipped = rawLines.length > 80;
+      const lines = rawLines.slice(0, 80).map((ln) => {
+        const cls = (typeof renderer !== 'undefined' && renderer.diffLineClass) ? renderer.diffLineClass(ln) : '';
+        return `<span class="${cls}">${escapeHtml(ln)}</span>`;
+      }).join('\n');
+      const more = clipped ? `<div style="font-size:11px;color:var(--text-faint);padding-left:18px;">… ${rawLines.length - 80} more lines</div>` : '';
+      return `<div class="hm-action-row"><span class="hm-tool-dot done"></span><span class="hm-action-title">Diff</span><span class="hm-action-sub">${escapeHtml(it.title)}</span></div><div class="hm-diff" style="margin-left:18px;"><pre style="margin:0;padding:6px 8px;font-family:var(--mono);font-size:11px;white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto;"><code>${lines}</code></pre>${more}</div>`;
+    }
+    if (it.kind === 'skill') return `<div class="hm-action-row"><span class="hm-tool-dot done"></span><span class="hm-action-title">Skill</span><span class="hm-action-sub">${escapeHtml(it.title)}</span></div>`;
+    return `<div class="hm-action-row"><span class="hm-tool-dot done"></span><span class="hm-action-title">${escapeHtml(it.title)}</span>${it.label ? `<span class="hm-action-sub">${escapeHtml(it.label.slice(0, 300))}</span>` : ''}</div>`;
+  }).join('');
+  host.innerHTML = `<details class="hm-actions"${collapsed ? '' : ' open'}><summary><span class="hm-actions-label">${escapeHtml(summaryLabel)}</span><span class="hm-actions-preview">${escapeHtml(preview)}</span><span class="hm-actions-chevron">▾</span></summary><div class="hm-actions-body">${rowsHtml}</div></details>`;
+  const details = host.querySelector('details.hm-actions');
+  if (details) details.addEventListener('toggle', () => { msg._actionsOpen = details.open; });
+  for (const more of host.querySelectorAll('[data-diff-more]')) {
+    more.addEventListener('click', () => {
+      const idx = Number(more.getAttribute('data-diff-more'));
+      const d = activity.diffs[idx];
+      const pre = host.querySelector(`pre[data-diff="${idx}"]`);
+      if (d && pre) {
+        const full = String(d.patch || '').split('\n').map((ln) => {
+          const cls = (typeof renderer !== 'undefined' && renderer.diffLineClass) ? renderer.diffLineClass(ln) : '';
+          return `<span class="${cls}">${escapeHtml(ln)}</span>`;
+        }).join('\n');
+        pre.querySelector('code').innerHTML = full;
+        pre.removeAttribute('data-collapsed');
+        pre.style.maxHeight = 'none';
+      }
+      more.remove();
+    });
+  }
+  for (const pre of host.querySelectorAll('pre[data-collapsed="1"]')) {
+    pre.addEventListener('click', () => {
+      pre.removeAttribute('data-collapsed');
+      pre.style.maxHeight = 'none';
+    }, { once: true });
+  }
+}
+
 function renderMessageBody(msg) {
   const el = msg._el;
   if (!el) return;
@@ -746,10 +1211,20 @@ function renderMessageBody(msg) {
   if (!body) return;
   const failed = msg._failedImgs || (msg._failedImgs = new Set());
   const bridged = msg._bridged || (msg._bridged = new Set());
-  const tokens = renderer.extractTokens(msg.content || '');
-  msg._media = tokens.media;
-  body.innerHTML = renderMarkdown(msg.content, { failed, bridged }, tokens);
-  attachMediaFallbacks(body, msg);
+  const activity = getActivity(msg) || msg._activity;
+  const hasActivity = Boolean(activity && (String(activity.thought || '').trim() || (activity.tools && activity.tools.length) || (activity.diffs && activity.diffs.length) || (activity.skills && activity.skills.length) || (activity.unknown && activity.unknown.length)));
+  const text = String(msg.content || '').trim();
+  if (!text && hasActivity) {
+    body.style.display = 'none';
+    body.innerHTML = '';
+  } else {
+    body.style.display = '';
+    const tokens = renderer.extractTokens(msg.content || '');
+    msg._media = tokens.media;
+    body.innerHTML = renderMarkdown(msg.content, { failed, bridged }, tokens);
+    attachMediaFallbacks(body, msg);
+  }
+  renderActivityBlocks(msg);
 }
 
 function scheduleStreamingRender(msg) {
@@ -778,7 +1253,7 @@ function renderMessages() {
     const div = document.createElement('div');
     div.className = `msg ${msg.role}${msg.streaming ? ' streaming' : ''}${msg.error ? ' error' : ''}`;
     const roleLabel = msg.error ? 'Error' : msg.role === 'user' ? 'You' : 'Hermes';
-    div.innerHTML = `<div class="msg-role">${escapeHtml(roleLabel)}</div><div class="msg-body"></div>`;
+    div.innerHTML = `<div class="msg-role">${escapeHtml(roleLabel)}</div><div class="hm-activity" style="display:none"></div><div class="msg-body"></div>`;
     msg._el = div;
     els.messages.appendChild(div);
     renderMessageBody(msg);
@@ -787,6 +1262,7 @@ function renderMessages() {
 }
 
 function openSettings(open) {
+  if (open) closeQuickMenu();
   document.body.classList.toggle('settings-open', open);
   els.settingsPanel.classList.toggle('hidden', !open);
   if (open) {
@@ -1099,18 +1575,17 @@ function insertSkill(item) {
   // CRITIQUE_BRIEF_9 #5: caret/selection outside the '/…' token (e.g. clicked
   // at position 0) — nothing to insert; stay a true no-op.
   if (!head.startsWith('/')) return;
-  const inserted = `/${item.name}`;
+  // skills items carry id/label, panel commands carry name — normalize.
+  const name = String(item.name || item.id || '').trim();
+  if (!name) return;
+  const inserted = `/${name}`;
   // CRITIQUE_BRIEF_9 #6: replace the whole in-progress token (up to whitespace),
   // not just the caret-to-head span — a mid-token selection would keep a tail.
   const sp = el.value.search(/\s/);
   const tokenEnd = sp === -1 ? el.value.length : sp;
-  el.value = inserted + el.value.slice(tokenEnd);
-  slashInserted = item.name; // CRITIQUE_BRIEF_9 #4: token-exact suppression
+  slashInserted = name; // CRITIQUE_BRIEF_9 #4: token-exact suppression
   closeCommandPopover();
-  autoResizePrompt();
-  const pos = el.value.length;
-  el.setSelectionRange(pos, pos); // caret to the end, focus stays in #prompt
-  el.focus();
+  setPromptValue(inserted + el.value.slice(tokenEnd));
 }
 
 async function openSkillsMenu() {
@@ -1124,7 +1599,14 @@ async function openSkillsMenu() {
     if (!res.ok) return; // silent — the next '/' re-fetches
     const payload = await readJson(res);
     if (isCommandPopoverOpen() || !els.prompt.value.startsWith('/')) return;
-    const items = rows(payload).map(skillItem).filter(Boolean);
+    // Panel commands ride on top of the gateway skills (insertSkill builds
+    // '/<name>' from .name, so these insert the command token for typing).
+    const panelCmds = [
+      { name: 'queue', label: '/queue', sublabel: 'Send after the current run finishes', group: 'Panel commands' },
+      { name: 'steer', label: '/steer', sublabel: 'Inject into the current run (falls back to queue)', group: 'Panel commands' },
+      { name: 'stop', label: '/stop', sublabel: 'Cancel the running turn', group: 'Panel commands' },
+    ];
+    const items = [...panelCmds, ...rows(payload).map(skillItem).filter(Boolean)];
     showCommandPopover({
       items,
       onSelect: insertSkill,
@@ -1151,6 +1633,21 @@ async function openSkillsMenu() {
 // Shared by the OS picker and the folder browser (TASK_BRIEF_12): a file
 // that must never be queued as text.
 const binaryExt = /\.(zip|rar|7z|gz|bz2|xz|tar|exe|msi|dll|so|bin|pdf|docx|xlsx|pptx|iso|jar)$/i;
+
+// Shared text-file acceptance for every read path (@file: picker, folder
+// browser, composer + button): NUL-byte binary detection (readAsText turns
+// invalid UTF-8 into U+0000 — CRITIQUE_BRIEF_10 #3) + the 512 KB cap.
+// Returns the (possibly truncated) content, or null after toasting.
+function acceptTextContent(name, content) {
+  if (content.includes('\u0000')) {
+    showBanner(`Skipped binary file: ${name}`, 'info');
+    return null;
+  }
+  if (content.length > 512 * 1024) {
+    content = `${content.slice(0, 512 * 1024)}\n… (truncated at 512 KB)`;
+  }
+  return content;
+}
 
 const AT_ITEMS = [
   { id: '@file:', label: '@file:', sublabel: 'Attach a local file (reads it client-side)', group: 'File', meta: { kind: 'file' } },
@@ -1195,54 +1692,26 @@ function atReplacePrefix(token) {
 function insertAt(item) {
   const kind = item?.meta?.kind;
   if (kind === 'file') insertAtFile();
-  else if (kind === 'url') insertAtUrl();
-  else if (kind === 'folder') insertAtFolder();
+  else if (kind === 'url') insertAtToken('@url:');
+  else if (kind === 'folder') insertAtToken('@folder:');
   else if (kind === 'diff' || kind === 'staged') insertGitRow(kind);
-  else if (kind === 'git') insertAtGit();
-  else insertAtImage();
+  else if (kind === 'git') insertAtToken('@git:');
+  else insertAtToken('@image:');
 }
 
-function insertAtUrl() {
+// Insert a command token ('@url:', '@image:', '@folder:', '@git:') in place
+// of the nearest '@…' before the caret, caret right after the colon so the
+// user can type/paste the URL/path/ref. No-op when there is no token before
+// the caret (CRITIQUE_BRIEF_10 #12: no caret jump — atReplacePrefix returns
+// null and never touches the prompt).
+function insertAtToken(token) {
   closeCommandPopover();
-  const r = atReplacePrefix('@url:');
-  if (!r) return; // CRITIQUE_BRIEF_10 #12: no token before the caret — no caret jump
-  const el = els.prompt;
-  const pos = r.prefix.length + 5;
-  el.setSelectionRange(pos, pos); // caret right after the colon — user pastes a URL
-  el.focus();
-}
-
-function insertAtImage() {
-  closeCommandPopover();
-  const r = atReplacePrefix('@image:');
-  if (!r) return; // CRITIQUE_BRIEF_10 #12: no token before the caret — no caret jump
-  const el = els.prompt;
-  const pos = r.prefix.length + 7;
-  el.setSelectionRange(pos, pos); // caret after the colon — user types/pastes a path
-  el.focus();
+  const r = atReplacePrefix(token);
+  if (!r) return;
+  setPromptValue(els.prompt.value, r.prefix.length + token.length);
 }
 
 // ── @folder: / @git: / @diff / @staged (TASK_BRIEF_12) ──────────
-
-function insertAtFolder() {
-  closeCommandPopover();
-  const r = atReplacePrefix('@folder:');
-  if (!r) return;
-  const el = els.prompt;
-  const pos = r.prefix.length + 8;
-  el.setSelectionRange(pos, pos); // caret after the colon — user types a path
-  el.focus();
-}
-
-function insertAtGit() {
-  closeCommandPopover();
-  const r = atReplacePrefix('@git:');
-  if (!r) return;
-  const el = els.prompt;
-  const pos = r.prefix.length + 5;
-  el.setSelectionRange(pos, pos); // caret after the colon — user types a ref
-  el.focus();
-}
 
 // @diff / @staged: instant rows — call /git once and swap the typed token
 // for the chip (no browse layer).
@@ -1258,12 +1727,7 @@ async function insertGitRow(op) {
       return; // the '@diff' token stays for editing
     }
     const entry = queueAttached('git', op, output);
-    const el = els.prompt;
-    el.value = r.prefix + entry.chip + r.tail;
-    autoResizePrompt();
-    const pos = el.value.length;
-    el.setSelectionRange(pos, pos);
-    el.focus();
+    setPromptValue(r.prefix + entry.chip + r.tail);
   } finally {
     gitRowBusy = false;
   }
@@ -1280,10 +1744,14 @@ function insertAtFile() {
 }
 
 function pickAtFiles() {
+  // Keep the input in the document while the picker is open — Chrome side
+  // panels drop change events from detached programmatic inputs.
   const input = document.createElement('input');
   input.type = 'file';
   input.multiple = true;
   input.accept = '*/*';
+  input.hidden = true;
+  document.body.appendChild(input);
   input.addEventListener('change', () => {
     const files = [...(input.files || [])];
     input.remove();
@@ -1329,16 +1797,10 @@ function handleAtFile(file, done) {
   }
   const reader = new FileReader();
   reader.onload = () => {
-    let content = String(reader.result || '');
-    // CRITIQUE_BRIEF_10 #3: content-based binary detection — null bytes in
-    // binary data land as U+0000 (readAsText replaces invalid UTF-8).
-    if (content.includes('\u0000')) {
-      showBanner(`Skipped binary file: ${file.name}`, 'info');
+    const content = acceptTextContent(file.name, String(reader.result || ''));
+    if (content === null) {
       done?.();
       return;
-    }
-    if (content.length > 512 * 1024) {
-      content = `${content.slice(0, 512 * 1024)}\n… (truncated at 512 KB)`;
     }
     const entry = queueAttached('file', file.name, content);
     atFileSession?.chips.push(entry.chip);
@@ -1355,12 +1817,8 @@ function handleAtFile(file, done) {
 function renderAtFilePrompt() {
   const s = atFileSession;
   if (!s) return;
-  const el = els.prompt;
   const chips = s.chips.join(' ');
-  el.value = s.prefix + chips + (s.tail ? `${chips ? ' ' : ''}${s.tail}` : '');
-  autoResizePrompt();
-  el.focus();
-  el.setSelectionRange(el.value.length, el.value.length);
+  setPromptValue(s.prefix + chips + (s.tail ? `${chips ? ' ' : ''}${s.tail}` : ''));
 }
 
 // CRITIQUE_BRIEF_10 #11: one queued entry per identity (re-adding the same
@@ -1444,14 +1902,8 @@ async function confirmAtUrl() {
   // fetch was in flight must cancel the commit — the value check alone
   // can't catch it, since Esc leaves the prompt text untouched.
   if (atUrlEscaped || !el.value.startsWith(head)) return;
-  {
-    const entry = queueAttached('url', url, content || title || '');
-    el.value = entry.chip + el.value.slice(head.length);
-    autoResizePrompt();
-    const pos = el.value.length;
-    el.setSelectionRange(pos, pos);
-    el.focus();
-  }
+  const entry = queueAttached('url', url, content || title || '');
+  setPromptValue(entry.chip + el.value.slice(head.length));
 }
 
 // TASK_BRIEF_12: Enter on an unconfirmed '@folder:' — everything after the
@@ -1542,25 +1994,21 @@ async function selectFolderEntry(item) {
 // Swap the '@folder:…' token for the chip; later picks stack after it. The
 // popover stays open so several files can be picked in one round.
 function putFolderChip(chip) {
-  const el = els.prompt;
   const s = folderSession;
   if (!s) return;
-  el.value = el.value.startsWith(s.head)
-    ? chip + el.value.slice(s.head.length)
-    : `${el.value} ${chip}`.trim();
-  autoResizePrompt();
-  el.setSelectionRange(el.value.length, el.value.length);
-  el.focus();
+  setPromptValue(els.prompt.value.startsWith(s.head)
+    ? chip + els.prompt.value.slice(s.head.length)
+    : `${els.prompt.value} ${chip}`.trim());
 }
 
 // A file picked in the folder browser is read through the bridge (the
 // extension has no filesystem access), then fed through the SAME acceptance
 // pipeline as the OS @file: picker — binary-ext + NUL-byte checks and the
 // 512 KB cap — so both flows share one reader path (TASK_BRIEF_12 spec 2).
-async function attachFolderFile(meta, quiet = false) {
+async function attachFolderFile(meta) {
   const { name, path } = meta;
   if (binaryExt.test(name)) {
-    if (!quiet) showBanner(`Skipped binary file: ${name}`, 'info');
+    showBanner(`Skipped binary file: ${name}`, 'info');
     return false;
   }
   let res;
@@ -1569,11 +2017,11 @@ async function attachFolderFile(meta, quiet = false) {
       signal: AbortSignal.timeout(60000),
     });
   } catch {
-    if (!quiet) showBanner(`Could not read ${name} — bridge unreachable.`, 'info');
+    showBanner(`Could not read ${name} — bridge unreachable.`, 'info');
     return false;
   }
   if (!res.ok) {
-    if (!quiet) showBanner(`Could not read ${name} (${res.status}).`, 'info');
+    showBanner(`Could not read ${name} (${res.status}).`, 'info');
     return false;
   }
   const ctype = (res.headers.get('Content-Type') || '').split(';')[0].trim();
@@ -1583,14 +2031,8 @@ async function attachFolderFile(meta, quiet = false) {
     ingestImageFile(new File([bytes], name, { type: ctype }));
     return true;
   }
-  let content = new TextDecoder('utf-8').decode(bytes);
-  if (content.includes('\u0000')) {
-    if (!quiet) showBanner(`Skipped binary file: ${name}`, 'info');
-    return false;
-  }
-  if (content.length > 512 * 1024) {
-    content = `${content.slice(0, 512 * 1024)}\n… (truncated at 512 KB)`;
-  }
+  const content = acceptTextContent(name, new TextDecoder('utf-8').decode(bytes));
+  if (content === null) return false;
   const entry = queueAttached('file', name, content);
   putFolderChip(entry.chip);
   return true;
@@ -1631,11 +2073,7 @@ async function confirmAtGit() {
   }
   if (!el.value.startsWith(head)) return; // edited away while fetching
   const entry = queueAttached('git', ref, output);
-  el.value = entry.chip + el.value.slice(head.length);
-  autoResizePrompt();
-  const pos = el.value.length;
-  el.setSelectionRange(pos, pos);
-  el.focus();
+  setPromptValue(entry.chip + el.value.slice(head.length));
 }
 
 // Prompt typing (TASK_BRIEF_10 extends the '/' hook): a leading '/' opens
@@ -1661,6 +2099,12 @@ function updatePrefixMenu() {
     const token = v.startsWith('/') ? v.slice(1).split(/\s/, 1)[0] : '';
     if (token === slashInserted) return;
     slashInserted = null; // token gone — normal rules resume
+  }
+  if (parseLocalCommand(v)) {
+    // '/queue …', '/steer …', '/stop' are panel commands — no skills menu
+    // floating over the argument text.
+    if (cmdPopover?.owner === 'skills') closeCommandPopover();
+    return;
   }
   if (v.startsWith('/')) {
     if (cmdPopover?.owner === 'skills') {
@@ -1891,10 +2335,13 @@ async function pollActiveSession() {
     if (activeSessionId !== sid || sending) return;
     if (!changed) return;
 
-    // Stage 2: full history + fingerprint reconciliation.
+    // Stage 2: full history + fingerprint reconciliation (text + activity).
     const serverMsgs = await getMessages(sid);
     if (activeSessionId !== sid || sending) return; // adoption-time guards
-    const fp = renderer.fingerprint(serverMsgs);
+    const afp = (typeof renderer !== 'undefined' && renderer.activityFingerprint)
+      ? serverMsgs.map((m) => renderer.activityFingerprint(m)).join('\u0001')
+      : '';
+    const fp = `${renderer.fingerprint(serverMsgs)}\u0000${afp}`;
     if (fp === lastFingerprint) return;
     if (Date.now() < quietUntil) return; // post-stream grace
     if (serverMsgs.length < messages.length && Date.now() - streamEndedAt < POLL_STALE_LIMIT_MS) {
@@ -1923,9 +2370,16 @@ function startPolling() {
   });
 }
 
-// Seed poll state from freshly-loaded/just-streamed local messages.
+// Seed poll state from freshly-loaded/just-streamed local messages (text + activity).
 function syncPollState() {
-  lastFingerprint = renderer.fingerprint(messages);
+  const afp = (typeof renderer !== 'undefined' && renderer.activityFingerprint)
+    ? messages.map((m) => {
+        const a = m._activity;
+        if (a) return renderer.activityFingerprint({ thought: a.thought, tools: a.tools, diffs: a.diffs, skills: a.skills, unknown: a.unknown });
+        return renderer.activityFingerprint(m);
+      }).join('\u0001')
+    : '';
+  lastFingerprint = `${renderer.fingerprint(messages)}\u0000${afp}`;
   streamEndedAt = Date.now();
   quietUntil = streamEndedAt + POLL_QUIET_MS;
   sessionMissing = false;
@@ -1965,6 +2419,8 @@ async function beginNewChat() {
   quietUntil = 0;
   streamEndedAt = 0;
   sessionMissing = false;
+  queuedTurns.length = 0; // stale context — queued messages don't carry over
+  renderQueueStrip();
   els.sessionTitle.textContent = 'New chat';
   renderMessages();
   showBanner('');
@@ -1999,6 +2455,8 @@ async function selectSession(id, title) {
   }
   closeSessionMenu();
   activeSessionId = id;
+  queuedTurns.length = 0; // the queue belonged to the previous session
+  renderQueueStrip();
   const label = title || id;
   els.sessionTitle.textContent = label;
   loadModelPref(); // spec 7: restore this session's stored choice
@@ -2024,6 +2482,7 @@ async function selectSession(id, title) {
 }
 
 async function openSessionMenu() {
+  closeQuickMenu();
   const open = els.sessionMenu.classList.contains('hidden');
   if (!open) {
     closeSessionMenu();
@@ -2040,6 +2499,134 @@ async function openSessionMenu() {
     els.sessionEmpty.classList.remove('hidden');
     els.sessionEmpty.textContent = err.message || 'Could not load sessions';
   }
+}
+
+// ── Run control: /stop, /steer, /queue (gateway /v1/runs API) ────
+// A client-side stream abort does NOT cancel the gateway run — it finishes
+// server-side and the poll then renders the reply ("stop doesn't work").
+// Stop therefore also POSTs /v1/runs/{run_id}/stop (cooperative interrupt;
+// run_id rides on every SSE event). /steer injects into the running turn and
+// falls back to /queue on a 409 (run not accepting input), matching the CLI.
+
+function stopActiveRun() {
+  const runId = activeRunId;
+  abortController?.abort(); // client stream off
+  activeRunId = null;
+  if (!runId) return;
+  hermesFetch(`/v1/runs/${encodeURIComponent(runId)}/stop`, {
+    method: 'POST',
+    body: '{}',
+  })
+    .then((res) => {
+      showBanner(res.ok
+        ? 'Stopped — the run was cancelled on the server.'
+        : 'Stopped the stream, but the server may still finish the run.', 'info');
+    })
+    .catch(() => showBanner('Stopped the stream (could not reach the server to cancel the run).', 'info'));
+}
+
+async function steerActiveRun(text) {
+  if (!activeRunId) {
+    // Steer needs the run_id, and only runs this panel is streaming expose
+    // theirs (the API has no session→run listing). Nothing to inject into
+    // from here → normal turn (queue semantics: send now when idle).
+    enqueueTurn(text, 'No run streaming in this panel — sending now. '
+      + '(/steer only reaches runs started from this panel.)');
+    return;
+  }
+  try {
+    const res = await hermesFetch(`/v1/runs/${encodeURIComponent(activeRunId)}/steer`, {
+      method: 'POST',
+      body: JSON.stringify({ message: text }),
+    });
+    if (res.ok) {
+      showBanner('Steered — the agent sees this after its next tool call.', 'info');
+      return;
+    }
+    if (res.status === 409) {
+      enqueueTurn(text, 'Run is not accepting steer input — queued as the next turn.');
+      return;
+    }
+    const payload = await readJson(res);
+    showBanner(`Steer failed: ${errorMessage(payload, res.status)}`);
+  } catch (err) {
+    showBanner(`Steer failed: ${err.message || err}`);
+  }
+}
+
+function enqueueTurn(text, note) {
+  if (!sending && !activeRunId) {
+    sendMessage(text); // idle — queue modes only apply while the agent works
+    return;
+  }
+  queuedTurns.push(text);
+  renderQueueStrip();
+  showBanner(note || 'Queued — sends when the current run finishes.', 'info');
+}
+
+function renderQueueStrip() {
+  els.queueStrip.classList.toggle('hidden', queuedTurns.length === 0);
+  els.queueStrip.innerHTML = '';
+  queuedTurns.forEach((text, i) => {
+    const chip = document.createElement('div');
+    chip.className = 'chip';
+    chip.title = text;
+    const label = document.createElement('span');
+    label.className = 'queue-chip-text';
+    label.textContent = `⏳ ${text.length > 60 ? `${text.slice(0, 59)}…` : text}`;
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'chip-x';
+    x.textContent = '×';
+    x.title = 'Remove queued message';
+    x.setAttribute('aria-label', 'Remove queued message');
+    x.addEventListener('click', () => {
+      queuedTurns.splice(i, 1);
+      renderQueueStrip();
+    });
+    chip.append(label, x);
+    els.queueStrip.appendChild(chip);
+  });
+}
+
+// Panel-local slash commands (never sent to the gateway as chat text).
+const LOCAL_COMMANDS = {
+  queue: '/queue <message> — send after the current run finishes (sends now when idle)',
+  steer: '/steer <message> — inject into the current run; falls back to queue',
+  stop: '/stop — cancel the running turn',
+};
+
+function parseLocalCommand(value) {
+  const m = /^\/(queue|steer|stop)(?:\s+([\s\S]*))?$/.exec(String(value || '').trim());
+  return m ? { cmd: m[1], arg: (m[2] || '').trim() } : null;
+}
+
+// Returns true when the prompt value was a local command and was consumed
+// (Enter must then not submit the form).
+function handleLocalCommand(value) {
+  const parsed = parseLocalCommand(value);
+  if (!parsed) return false;
+  closeCommandPopover();
+  const { cmd, arg } = parsed;
+  if (cmd === 'stop') {
+    if (!sending && !activeRunId) {
+      showBanner('Nothing is running.', 'info');
+    } else {
+      stopActiveRun();
+    }
+    els.prompt.value = '';
+    autoResizePrompt();
+    return true;
+  }
+  if (!arg) {
+    showBanner(LOCAL_COMMANDS[cmd], 'info');
+    return true;
+  }
+  els.prompt.value = '';
+  autoResizePrompt();
+  if (cmd === 'queue') enqueueTurn(arg);
+  else steerActiveRun(arg);
+  return true;
 }
 
 async function sendMessage(text) {
@@ -2120,11 +2707,10 @@ async function sendMessage(text) {
   updateRunningIndicator();
 
   try {
-    // v1 body: plain message (+ @image: data URLs as lines). browser_use
-    // toggle is reserved for later.
+    // Plain message (+ @image: data URLs as lines). Browser use runs
+    // agent-side through the live_browser MCP — no page context here.
     const body = {
       message: full,
-      // When browser use lands: include page context here if settings.browserUse.
     };
     // TASK_BRIEF_11: every turn carries the per-session model lock — the
     // stored preference first, else the server-reported current model.
@@ -2156,6 +2742,10 @@ async function sendMessage(text) {
 
     const finalText = await readHermesSse(res, {
       signal: abortController.signal,
+      onEvent: (type, data) => {
+        if (data?.run_id) activeRunId = data.run_id; // run.started arrives first thing
+        if (ingestActivityEvent(assistantMsg, type, data)) scheduleStreamingRender(assistantMsg);
+      },
       onAssistant: (content) => {
         assistantMsg.content = content;
         scheduleStreamingRender(assistantMsg);
@@ -2163,8 +2753,14 @@ async function sendMessage(text) {
     });
 
     clearTimeout(streamTimer);
-    assistantMsg.content = finalText || assistantMsg.content || '(empty reply)';
+    assistantMsg.content = finalText || assistantMsg.content || '';
+    const act = assistantMsg._activity;
+    const hasAct = Boolean(act && (String(act.thought || '').trim() || (act.tools && act.tools.length) || (act.diffs && act.diffs.length) || (act.skills && act.skills.length) || (act.unknown && act.unknown.length)));
+    if (!assistantMsg.content && !hasAct) assistantMsg.content = '(empty reply)';
     assistantMsg.streaming = false;
+    if (act) {
+      for (const t of act.tools) if (t.status === 'running') t.status = 'done';
+    }
     syncPollState();
     renderMessages();
     setConnection('online', baseUrl().replace(/^https?:\/\//, ''));
@@ -2173,8 +2769,10 @@ async function sendMessage(text) {
       assistantMsg.content = assistantMsg.content || '(stopped)';
       assistantMsg.streaming = false;
     } else {
-      // Drop empty streaming bubble; show error instead.
-      if (!assistantMsg.content) {
+      // Drop empty streaming bubble; show error instead. Keep activity bubbles even when content is empty.
+      const act2 = assistantMsg._activity;
+      const hasAct2 = Boolean(act2 && (String(act2.thought || '').trim() || (act2.tools && act2.tools.length) || (act2.diffs && act2.diffs.length) || (act2.skills && act2.skills.length) || (act2.unknown && act2.unknown.length)));
+      if (!assistantMsg.content && !hasAct2) {
         messages = messages.filter((m) => m !== assistantMsg);
         messages.push({ role: 'assistant', content: err.message || String(err), error: true });
       } else {
@@ -2188,18 +2786,24 @@ async function sendMessage(text) {
     renderMessages();
   } finally {
     abortController = null;
+    activeRunId = null;
     streamingSessionId = '';
     setSending(false);
     autoResizePrompt();
     els.prompt.focus();
+    // /queue drain: the run finished — fire the next queued turn.
+    if (queuedTurns.length && settings.apiKey) {
+      sendMessage(queuedTurns.shift());
+      renderQueueStrip();
+    }
   }
 }
 
 // ── Event wiring ─────────────────────────────────────────────────
 
-els.btnSettings.addEventListener('click', () => openSettings(true));
+els.btnSettings.addEventListener('click', () => { closeQuickMenu(); openSettings(true); });
 els.btnCloseSettings.addEventListener('click', () => openSettings(false));
-els.btnNew.addEventListener('click', () => beginNewChat());
+els.btnNew.addEventListener('click', () => { closeQuickMenu(); beginNewChat(); });
 els.btnSessions.addEventListener('click', (e) => {
   e.stopPropagation();
   openSessionMenu();
@@ -2209,10 +2813,42 @@ els.btnRefreshSessions.addEventListener('click', (e) => {
   openSessionMenu();
 });
 
+// Quick menu (three-dot)
+function closeQuickMenu() {
+  els.quickMenu.classList.add('hidden');
+  els.btnMenu.setAttribute('aria-expanded', 'false');
+}
+function openQuickMenu() {
+  els.quickMenu.classList.remove('hidden');
+  els.btnMenu.setAttribute('aria-expanded', 'true');
+}
+function toggleQuickMenu() {
+  if (els.quickMenu.classList.contains('hidden')) openQuickMenu();
+  else closeQuickMenu();
+}
+els.btnMenu.addEventListener('click', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  closeSessionMenu();
+  toggleQuickMenu();
+});
+els.btnBrowserMenu.addEventListener('click', () => {
+  closeQuickMenu();
+  // Toggle the browser panel (same as clicking the browser chip)
+  els.btnBrowser.click();
+});
+
 document.addEventListener('click', (e) => {
+  // Close session menu on outside click
   if (!els.sessionMenu.classList.contains('hidden')) {
     if (!els.sessionMenu.contains(e.target) && e.target !== els.btnSessions && !els.btnSessions.contains(e.target)) {
       closeSessionMenu();
+    }
+  }
+  // Close quick menu on outside click
+  if (!els.quickMenu.classList.contains('hidden')) {
+    if (!els.quickMenu.contains(e.target) && e.target !== els.btnMenu && !els.btnMenu.contains(e.target)) {
+      closeQuickMenu();
     }
   }
 });
@@ -2258,10 +2894,54 @@ els.btnTest.addEventListener('click', async () => {
   }
 });
 
+function collectSteerTextAndClear() {
+  if (!els.prompt.value.trim() && attachments.length === 0 && attachedContext.length === 0) return null;
+  const raw = els.prompt.value;
+  const pending = [...attachments];
+  const ctxBlocks = [];
+  for (const item of attachedContext) {
+    // During a steer the prompt holds the chip text already — expand it here;
+    // otherwise plain typed text stays as-is.
+    if (raw.includes(item.chip)) ctxBlocks.push(`[${{ file: 'File', url: 'URL', git: 'Git', folder: 'Folder' }[item.kind] || item.kind}: ${item.label}]\n${item.content}`);
+  }
+  let text = raw;
+  if (ctxBlocks.length) text = `${text}${text ? '\n\n' : ''}--- Attached Context ---\n${ctxBlocks.join('\n\n')}`;
+  text = text.trim();
+  els.prompt.value = '';
+  attachments.length = 0;
+  attachedContext.length = 0;
+  renderChips();
+  slashInserted = null;
+  slashDismissed = null;
+  atDismissed = null;
+  atUrlEscaped = false;
+  autoResizePrompt();
+  updateSendDisabled();
+  if (pending.length) {
+    (async () => {
+      for (const a of pending) {
+        try {
+          const enc = await encodeForSend(a.dataUrl);
+          const path = await saveImageToBridge(enc);
+          const line = path ? `@image:${path}` : `@image:${await cappedDataUrl(enc)}`;
+          if (sending) enqueueTurn(line, 'Image queued — sends after this run.');
+          else sendMessage(line);
+        } catch {}
+      }
+    })();
+  }
+  return text || null;
+}
+
 els.composer.addEventListener('submit', (e) => {
   e.preventDefault();
   if (sending) {
-    abortController?.abort();
+    if (handleLocalCommand(els.prompt.value)) return;
+    const hasSteerContent = Boolean(els.prompt.value.trim() || attachments.length || attachedContext.length);
+    if (!hasSteerContent) { stopActiveRun(); return; }
+    const text = collectSteerTextAndClear();
+    if (!text) return;
+    steerActiveRun(text);
     return;
   }
   sendMessage(els.prompt.value);
@@ -2270,16 +2950,58 @@ els.composer.addEventListener('submit', (e) => {
 els.btnSend.addEventListener('click', (e) => {
   if (sending) {
     e.preventDefault();
-    abortController?.abort();
+    if (handleLocalCommand(els.prompt.value)) return;
+    const hasSteerContent = Boolean(els.prompt.value.trim() || attachments.length || attachedContext.length);
+    if (!hasSteerContent) { stopActiveRun(); return; }
+    const text = collectSteerTextAndClear();
+    if (!text) return;
+    steerActiveRun(text);
   }
 });
 
-els.prompt.addEventListener('input', autoResizePrompt);
 els.prompt.addEventListener('input', () => {
+  if (promptHistoryIndex !== -1) {
+    promptHistoryIndex = -1;
+    promptHistoryDraft = els.prompt.value;
+  }
+  autoResizePrompt();
   // TASK_BRIEF_9/10: '/' + '@' menus open/sync/close from the popover hook.
   updatePrefixMenu();
 });
 els.prompt.addEventListener('keydown', (e) => {
+  if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.altKey && !e.ctrlKey && !e.metaKey && !isCommandPopoverOpen()) {
+    const atBoundary = e.key === 'ArrowUp'
+      ? els.prompt.selectionStart === 0 && els.prompt.selectionEnd === 0
+      : els.prompt.selectionStart === els.prompt.value.length && els.prompt.selectionEnd === els.prompt.value.length;
+    if (atBoundary && navigatePromptHistory(e.key === 'ArrowUp' ? 1 : -1)) {
+      e.preventDefault();
+      return;
+    }
+  }
+  if (e.key === 'Escape' && sending && !isCommandPopoverOpen() && !els.prompt.value.startsWith('@url:')) {
+    e.preventDefault();
+    stopActiveRun();
+    showBanner('Stopped — the run was cancelled on the server.', 'info');
+    return;
+  }
+  if (sending && e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+    if (isCommandPopoverOpen()) { cmdHandleKey(e); return; }
+    if (els.prompt.value.startsWith('@url:') && !atUrlEscaped) { e.preventDefault(); confirmAtUrl(); return; }
+    if (els.prompt.value.startsWith('@folder:')) { e.preventDefault(); confirmAtFolder(); return; }
+    if (els.prompt.value.startsWith('@git:')) { e.preventDefault(); confirmAtGit(); return; }
+    if (!els.prompt.value.trim() && attachments.length === 0 && attachedContext.length === 0) return;
+    e.preventDefault();
+    if (handleLocalCommand(els.prompt.value)) return;
+    const text = collectSteerTextAndClear();
+    if (text) steerActiveRun(text);
+    return;
+  }
+  // Panel-local commands (/queue, /steer, /stop) win over the skills popover
+  // and over sending — checked first so '/steer do X' + Enter never submits.
+  if (e.key === 'Enter' && !e.shiftKey && handleLocalCommand(els.prompt.value)) {
+    e.preventDefault();
+    return;
+  }
   if (isCommandPopoverOpen()) {
     // Popover takes over the keys: arrows move the highlight, Enter selects
     // (never submits), Escape closes. The normal send flow stays untouched
@@ -2356,44 +3078,132 @@ els.previewClose.addEventListener('click', closePreview);
 els.preview.addEventListener('click', (e) => {
   if (e.target === els.preview || e.target.classList.contains('preview-backdrop')) closePreview();
 });
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !els.preview.classList.contains('hidden')) closePreview();
+
+// Attach button: permanent input in the DOM (Chrome side panels ignore
+// click() on a freshly created, detached <input type="file">). Images go
+// to the paste chip strip; text files become [File: …] attached-context chips.
+function ingestComposerFiles(fileList) {
+  const files = [...(fileList || [])];
+  if (!files.length) return;
+  for (const file of files) {
+    if (!file) continue;
+    if (file.type.startsWith('image/')) {
+      ingestImageFile(file);
+      continue;
+    }
+    // Reuse @file: reader path, but inject the chip into the live prompt
+    // (no atFileSession — the + button is not a token round).
+    handleComposerFile(file);
+  }
+}
+
+function handleComposerFile(file) {
+  const textMime = /^(text\/|application\/.*(json|xml)(;|$))/;
+  if (binaryExt.test(file.name) || (file.type && !textMime.test(file.type))) {
+    showBanner(`Skipped binary file: ${file.name}`, 'info');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const content = acceptTextContent(file.name, String(reader.result || ''));
+    if (content === null) return;
+    const entry = queueAttached('file', file.name, content);
+    const pad = els.prompt.value && !/\s$/.test(els.prompt.value) ? ' ' : '';
+    setPromptValue(`${els.prompt.value}${pad}${entry.chip}`);
+  };
+  reader.onerror = () => showBanner(`Could not read ${file.name}`, 'info');
+  reader.readAsText(file);
+}
+
+els.btnAttach.addEventListener('click', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  if (!els.attachInput) return;
+  els.attachInput.value = ''; // allow re-picking the same file
+  els.attachInput.click();
+});
+els.attachInput?.addEventListener('change', () => {
+  ingestComposerFiles(els.attachInput.files);
+  els.attachInput.value = '';
 });
 
-// ── Browser-use B1 (TASK_BRIEF_B1) ──────────────────────────────
-// Status chip + tab picker for the live-browser bridge (background.js
-// owns the WS client and chrome.debugger; this panel is the UI).
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !els.preview.classList.contains('hidden')) closePreview();
+  else if (e.key === 'Escape' && !els.quickMenu.classList.contains('hidden')) {
+    e.preventDefault();
+    closeQuickMenu();
+  }
+});
+
+// ── Browser-use (B1+) ────────────────────────────────────────────
+// Status chip + agent-session card for the live-browser bridge
+// (background.js owns the WS client and chrome.debugger; this panel is
+// the UI). Attachment is AGENT-driven (demand-only debugger): the chip
+// and card reflect what the agent is doing, not what the user attached.
+// Manual attach survives under the Advanced disclosure.
 
 const BROWSER_TABS_THROTTLE_MS = 400;
+const BROWSER_POLL_MS = 2000;      // state round-trip while the panel is open
+const BROWSER_TICK_MS = 1000;      // local re-render: countdown / pulse decay
+const DRIVING_WINDOW_MS = 10_000;  // mirrors background.js
+const IDLE_RELEASE_MS = 3 * 60_000; // mirrors background.js IDLE_DETACH_MS
 
 let browserState = { ws: 'down', attached: false, tab: null }; // mirror of background
 let browserTabs = [];
 let browserTabTimer = null;
+let browserPollTimer = null;
+
+function drivingNow() {
+  return Boolean(browserState.attached) && browserState.lastActivity > 0 &&
+    Date.now() - browserState.lastActivity < DRIVING_WINDOW_MS;
+}
+
+function fmtAgo(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 3) return 'just now';
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function fmtIn(ms) {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function tabLabel(tab) {
+  const s = String(tab?.title || tab?.url || 'tab');
+  return s.length > 36 ? `${s.slice(0, 35)}…` : s;
+}
 
 function browserChipClass() {
   if (browserState.ws !== 'connected') return 'state-off';
-  if (browserState.attached) return browserState.tab?.incognito ? 'state-attn' : 'state-on';
-  return 'state-attn';
+  if (!browserState.attached) return 'state-ready'; // healthy resting state
+  if (browserState.tab?.incognito) return 'state-attn';
+  return 'state-on';
 }
 
 function renderBrowserChip() {
   const el = els.btnBrowser;
-  el.classList.remove('state-on', 'state-attn', 'state-off');
+  el.classList.remove('state-on', 'state-attn', 'state-off', 'state-ready', 'driving');
   el.classList.add(browserChipClass());
+  if (drivingNow()) el.classList.add('driving');
   if (browserState.ws !== 'connected') {
     els.browserChipText.textContent = '○ bridge down';
-  } else if (browserState.attached && browserState.tab) {
-    const title = browserState.tab.title || browserState.tab.url || 'tab';
-    const flag = browserState.tab.incognito ? ' (incognito)' : '';
-    els.browserChipText.textContent = `● ${browserState.browser || 'Chrome'} — "${title}"${flag}`;
+  } else if (!browserState.attached) {
+    els.browserChipText.textContent = '○ browser ready';
   } else {
-    els.browserChipText.textContent = '○ no tab attached';
+    const title = tabLabel(browserState.tab);
+    const flag = browserState.tab?.incognito ? ' (incognito)' : '';
+    els.browserChipText.textContent = drivingNow()
+      ? `● driving — "${title}"${flag}`
+      : `○ attached — "${title}"${flag}`;
   }
   els.btnBrowserDisconnect.textContent =
-    browserState.ws === 'connected' || browserState.attached ? 'Disconnect' : 'Reconnect';
+    browserState.ws === 'connected' || browserState.attached ? 'Disconnect agent' : 'Reconnect agent';
 }
 
 function renderBrowserTabs() {
+  if (els.browserAdvanced.classList.contains('hidden')) return; // advanced closed — skip
   const list = els.browserTabs;
   list.textContent = '';
   if (browserState.ws !== 'connected') {
@@ -2438,6 +3248,50 @@ function renderBrowserTabs() {
   }
 }
 
+// The agent-session card: connection state, what's being driven, and the
+// idle-release countdown. Re-rendered by the 1 s tick so the countdown and
+// "driving" pulse decay without new messages.
+function renderBrowserStatus() {
+  const el = els.browserStatus;
+  el.textContent = '';
+  el.classList.remove('state-on', 'state-off');
+  const line = (cls, text) => {
+    const d = document.createElement('div');
+    d.className = cls;
+    d.textContent = text;
+    el.appendChild(d);
+  };
+  if (browserState.ws !== 'connected') {
+    el.classList.add('state-off');
+    line('browser-status-title', 'Bridge down');
+    line('browser-status-sub',
+      'Start browser-mcp.py (Hermes spawns it automatically), then reload the extension.');
+    return;
+  }
+  if (!browserState.attached) {
+    line('browser-status-title', 'Idle — debugger released');
+    line('browser-status-sub',
+      'No debugging banner is shown. The agent attaches a tab automatically when it next uses a browser tool.');
+    return;
+  }
+  el.classList.add('state-on');
+  const title = tabLabel(browserState.tab);
+  const flag = browserState.tab?.incognito ? ' (incognito ⚠)' : '';
+  if (drivingNow()) {
+    line('browser-status-title', `Driving "${title}"${flag}`);
+    line('browser-status-sub', `Agent is using browser tools — last action ${fmtAgo(Date.now() - browserState.lastActivity)}.`);
+  } else if (browserState.lastActivity > 0) {
+    line('browser-status-title', `Attached to "${title}"${flag}`);
+    const left = browserState.lastActivity + IDLE_RELEASE_MS - Date.now();
+    line('browser-status-sub', left > 0
+      ? `Quiet — debugger auto-releases in ${fmtIn(left)}.`
+      : 'Quiet — releasing the debugger…');
+  } else {
+    line('browser-status-title', `Attached to "${title}"${flag}`);
+    line('browser-status-sub', 'Agent idle.');
+  }
+}
+
 async function browserQueryState() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'browser-get-state' });
@@ -2446,6 +3300,7 @@ async function browserQueryState() {
     browserState = { ws: 'down', attached: false, tab: null };
   }
   renderBrowserChip();
+  renderBrowserStatus();
   renderBrowserTabs();
 }
 
@@ -2479,6 +3334,7 @@ async function browserDisconnect() {
   await chrome.runtime.sendMessage({ type: 'browser-disconnect' });
   browserState = { ws: 'down', attached: false, tab: null };
   renderBrowserChip();
+  renderBrowserStatus();
   renderBrowserTabs();
 }
 
@@ -2491,7 +3347,10 @@ function initBrowserUI() {
   els.btnBrowser.addEventListener('click', () => {
     const willOpen = els.browserPanel.classList.contains('hidden');
     els.browserPanel.classList.toggle('hidden', !willOpen);
-    if (willOpen) loadBrowserTabs();
+    if (willOpen) {
+      browserQueryState();
+      loadBrowserTabs();
+    }
   });
   els.btnBrowserRefresh.addEventListener('click', () => {
     browserQueryState();
@@ -2499,6 +3358,18 @@ function initBrowserUI() {
   });
   els.btnBrowserCollapse.addEventListener('click', () => {
     els.browserPanel.classList.add('hidden');
+  });
+  els.btnBrowserAdvanced.addEventListener('click', () => {
+    const willOpen = els.browserAdvanced.classList.contains('hidden');
+    els.browserAdvanced.classList.toggle('hidden', !willOpen);
+    els.btnBrowserAdvanced.setAttribute('aria-expanded', String(willOpen));
+    els.btnBrowserAdvanced.textContent = willOpen
+      ? '▾ Advanced — manual attach & pairing'
+      : '▸ Advanced — manual attach & pairing';
+    if (willOpen) {
+      browserQueryState();
+      loadBrowserTabs();
+    }
   });
   els.btnBrowserDisconnect.addEventListener('click', () => {
     if (browserState.ws === 'connected' || browserState.attached) {
@@ -2511,6 +3382,7 @@ function initBrowserUI() {
     await chrome.runtime.sendMessage({ type: 'browser-reset-pairing' });
     browserState = { ws: 'down', attached: false, tab: null };
     renderBrowserChip();
+    renderBrowserStatus();
     renderBrowserTabs();
     showBanner('Pairing reset — reconnecting with a fresh token', 'info');
   });
@@ -2518,6 +3390,7 @@ function initBrowserUI() {
     if (msg?.type === 'browser-state') {
       browserState = { ...browserState, ...msg };
       renderBrowserChip();
+      renderBrowserStatus();
       renderBrowserTabs();
     }
   });
@@ -2527,6 +3400,16 @@ function initBrowserUI() {
   chrome.tabs.onUpdated?.addListener((_id, info) => {
     if (info.title !== undefined || info.url !== undefined) loadBrowserTabs();
   });
+  // State round-trip while the panel is open (driving/idle transitions and
+  // fresh lastAction timestamps), plus a local 1 s tick so the idle-release
+  // countdown and the driving pulse decay without any messages.
+  browserPollTimer = setInterval(() => {
+    if (!els.browserPanel.classList.contains('hidden')) browserQueryState();
+  }, BROWSER_POLL_MS);
+  setInterval(() => {
+    renderBrowserChip();
+    if (!els.browserPanel.classList.contains('hidden')) renderBrowserStatus();
+  }, BROWSER_TICK_MS);
   browserQueryState();
   loadBrowserTabs();
 }

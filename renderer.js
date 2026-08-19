@@ -291,7 +291,27 @@ function fingerprint(msgs) {
   return JSON.stringify((msgs || []).map((m) => `${m && m.role}\u0000${m && m.content != null ? String(m.content) : ''}`));
 }
 
-const api = { extractTokens, scanInlineMath, mediaUrl, mediaKind, fingerprint, fixAttributeSentinels };
+function diffLineClass(line) {
+  if (line.startsWith('@@')) return 'd-hunk';
+  if (line.startsWith('+') && !line.startsWith('+++')) return 'd-add';
+  if (line.startsWith('-') && !line.startsWith('---')) return 'd-del';
+  return '';
+}
+
+function activityFingerprint(msg) {
+  const parts = [];
+  if (msg && msg.thought) parts.push(`T:${String(msg.thought).slice(0, 200)}`);
+  for (const t of (msg && msg.tools) || []) {
+    parts.push(`X:${t.name || t.type || ''}:${t.status || ''}:${String(t.output || t.result || '').slice(0, 80)}`);
+  }
+  for (const d of (msg && msg.diffs) || []) {
+    parts.push(`D:${d.path || ''}:${String(d.patch || '').slice(0, 80)}`);
+  }
+  for (const s of (msg && msg.skills) || []) parts.push(`S:${s.name || s}`);
+  return parts.join('|');
+}
+
+const api = { extractTokens, scanInlineMath, mediaUrl, mediaKind, fingerprint, fixAttributeSentinels, diffLineClass, activityFingerprint };
 
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else globalThis.renderer = api;

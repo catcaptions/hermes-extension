@@ -17,6 +17,16 @@ const ACK_TIMEOUT_MS = 5000;
 // clamped by Chrome anyway, so use 30 s directly.
 const KEEPALIVE_PERIOD_MIN = 0.5;
 
+// Demand-only debugger: every chrome.debugger.attach re-shows Chrome's
+// "Hermes Minimal started debugging this browser" banner, so the debugger
+// is attached ONLY while the hub is actually driving the browser. When no
+// agent command (cdp/tabs/status) arrives for this long, release the
+// debugger — the banner disappears until the next tool call re-attaches.
+const IDLE_DETACH_MS = 3 * 60 * 1000;
+// "Driving" window for the sidepanel UI: hub commands this recent mean the
+// agent is actively working (chip pulse / session card text).
+const DRIVING_WINDOW_MS = 10 * 1000;
+
 function detectBrowserName() {
   // userAgentData.brands[0] is often the low-entropy placeholder
   // "Not=A?Brand" — scan for the real brand instead.
@@ -37,6 +47,14 @@ function detectBrowserName() {
 
 const BROWSER_NAME = detectBrowserName();
 
+// chrome.debugger cannot attach to browser-internal pages (chrome://settings,
+// edge://newtab, about:blank, chrome-extension://…, devtools://, view-source:…).
+const INTERNAL_TAB_RE = /^(chrome|edge|about|chrome-extension|chrome-devtools|devtools|view-source|chrome-search):/i;
+
+function isInternalTab(tab) {
+  return INTERNAL_TAB_RE.test(tab?.url || '');
+}
+
 // ── WS client ────────────────────────────────────────────────────
 
 let ws = null;
@@ -45,6 +63,10 @@ let wsTimer = null;
 let wsEnabled = true; // false after the user hits Disconnect (kill-switch)
 let paired = false;   // true only after a successful hello-ack from the hub
 let ackTimer = null;
+// Last agent-driven hub command (cdp/tabs/status). Heartbeats and keep-alive
+// pings do NOT count — they are exactly the "connected but nobody using it"
+// case the idle release exists for.
+let lastHubActivity = Date.now();
 
 function wsSend(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
@@ -123,15 +145,23 @@ async function onWsMessage(e) {
     if (msg.ok === true) {
       paired = true;
       broadcastBrowserState();
-      autoAttachToActiveTab('paired'); // follow the user's current tab
+      // Demand-only debugger: NO attach here. Pairing is transport, not
+      // agent activity — attaching now would flash the debugging banner
+      // with nobody driving. The hub attaches a tab on the first tool call.
     } else {
       try { ws.close(); } catch {} // hub said no — back off and retry
     }
     return;
   }
   if (msg.cmd === 'ping') { wsSend({ cmd: 'pong' }); return; }
+  if (msg.cmd === 'cdp' || msg.cmd === 'tabs' || msg.cmd === 'status') {
+    const wasDriving = Date.now() - lastHubActivity < DRIVING_WINDOW_MS;
+    lastHubActivity = Date.now(); // agent activity — push the idle release back
+    if (!wasDriving) broadcastBrowserState(); // idle→driving edge: refresh the chip
+  }
   if (msg.cmd === 'cdp') await handleCdp(msg);
   else if (msg.cmd === 'status') await handleStatus(msg);
+  else if (msg.cmd === 'tabs') await handleTabs(msg);
 }
 
 // ── Debugger relay ───────────────────────────────────────────────
@@ -162,17 +192,148 @@ async function handleStatus(msg) {
   wsSend({ id: msg.id, ok: true, result: state });
 }
 
+// B2: browser_tabs tool backing — list/activate/close/new/attach/detach.
+function tabInfo(t) {
+  return { id: t.id, title: t.title, url: t.url, active: Boolean(t.active), incognito: Boolean(t.incognito) };
+}
+
+async function findTabByHint(msg) {
+  const tabs = await chrome.tabs.query({});
+  if (msg.tabId) {
+    const hit = tabs.find((t) => t.id === msg.tabId);
+    return hit || null;
+  }
+  const urlNeedle = String(msg.url || '').toLowerCase();
+  const titleNeedle = String(msg.title || '').toLowerCase();
+  if (!urlNeedle && !titleNeedle) return null;
+  return tabs.find((t) => {
+    const url = String(t.url || '').toLowerCase();
+    const title = String(t.title || '').toLowerCase();
+    if (urlNeedle && url.includes(urlNeedle)) return true;
+    if (titleNeedle && title.includes(titleNeedle)) return true;
+    return false;
+  }) || null;
+}
+
+async function resolveTabForAttach(msg) {
+  // Explicit id / url / title first; otherwise the focused tab (agent default).
+  const hinted = await findTabByHint(msg);
+  if (hinted) return hinted;
+  if (msg.tabId || msg.url || msg.title) return null; // hint given but missed
+  const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!active) return null;
+  if (!isInternalTab(active)) return active;
+  // Active tab is internal (undebuggable) — fall back to the first
+  // non-internal tab in the window; if all are internal, return the active
+  // tab anyway so the caller surfaces a clean attach error.
+  const tabs = await chrome.tabs.query({ currentWindow: true });
+  const nonInternal = tabs.filter((t) => !isInternalTab(t));
+  if (nonInternal.length > 0) {
+    return nonInternal.find((t) => !t.active) || nonInternal[0];
+  }
+  return active;
+}
+
+async function handleTabs(msg) {
+  try {
+    if (msg.action === 'list') {
+      const tabs = await chrome.tabs.query({});
+      const attachedTabId = await getAttachedTabId();
+      wsSend({
+        id: msg.id,
+        ok: true,
+        result: {
+          tabs: tabs.map(tabInfo),
+          attachedTabId,
+        },
+      });
+    } else if (msg.action === 'attach') {
+      const tab = await resolveTabForAttach(msg);
+      if (!tab) {
+        return wsSend({ id: msg.id, ok: false, error: 'TAB_NOT_FOUND' });
+      }
+      const res = await attachTab(tab.id);
+      if (!res.ok) {
+        return wsSend({ id: msg.id, ok: false, error: res.error || 'ATTACH_FAILED', message: res.message });
+      }
+      wsSend({ id: msg.id, ok: true, result: { attached: true, tab: res.tab || tabInfo(tab) } });
+    } else if (msg.action === 'detach') {
+      const current = await getAttachedTabId();
+      const tabId = msg.tabId || current;
+      if (tabId == null) {
+        return wsSend({ id: msg.id, ok: true, result: { attached: false, tab: null } });
+      }
+      await detachTab(tabId);
+      wsSend({ id: msg.id, ok: true, result: { attached: false, tab: null } });
+    } else if (msg.action === 'activate') {
+      // Focus the tab AND attach the debugger before replying — otherwise the
+      // agent's next CDP call races auto-attach and gets TAB_NOT_ATTACHED.
+      const tab = await resolveTabForAttach(msg);
+      if (!tab) {
+        return wsSend({ id: msg.id, ok: false, error: 'TAB_NOT_FOUND' });
+      }
+      const focused = await chrome.tabs.update(tab.id, { active: true });
+      if (focused?.windowId != null) {
+        await chrome.windows.update(focused.windowId, { focused: true }).catch(() => {});
+      }
+      const res = await attachTab(tab.id);
+      if (!res.ok) {
+        return wsSend({
+          id: msg.id,
+          ok: false,
+          error: res.error || 'ATTACH_FAILED',
+          message: res.message,
+        });
+      }
+      wsSend({
+        id: msg.id,
+        ok: true,
+        result: { tab: res.tab || tabInfo(focused || tab), attached: true },
+      });
+    } else if (msg.action === 'close') {
+      await chrome.tabs.remove(msg.tabId);
+      wsSend({ id: msg.id, ok: true, result: {} });
+    } else if (msg.action === 'new') {
+      const tab = await chrome.tabs.create({ url: msg.url || 'about:blank' });
+      // New tab: attach immediately so navigate/snapshot work without a second call.
+      const res = await attachTab(tab.id);
+      if (!res.ok) {
+        return wsSend({
+          id: msg.id,
+          ok: false,
+          error: res.error || 'ATTACH_FAILED',
+          message: res.message,
+        });
+      }
+      wsSend({ id: msg.id, ok: true, result: { tab: res.tab || tabInfo(tab), attached: true } });
+    } else {
+      wsSend({ id: msg.id, ok: false, error: 'unknown tabs action' });
+    }
+  } catch (err) {
+    wsSend({ id: msg.id, ok: false, error: String(err?.message || err) });
+  }
+}
+
 // Current truth: the storage-attached tab, verified live against
 // chrome.debugger targets (survives SW restarts).
+function activityInfo() {
+  // For the sidepanel's agent-session card: when the agent last acted, and
+  // whether it's inside the "driving" window right now.
+  return {
+    lastActivity: lastHubActivity,
+    driving: Date.now() - lastHubActivity < DRIVING_WINDOW_MS,
+  };
+}
+
 async function getBrowserState() {
   const attachedTabId = await getAttachedTabId();
   if (attachedTabId == null) {
-    return { attached: false, tab: null, debugger: 'none', browser: BROWSER_NAME };
+    return { attached: false, tab: null, debugger: 'none', browser: BROWSER_NAME, ...activityInfo() };
   }
   try {
     const targets = await chrome.debugger.getTargets();
     if (!targets.some((t) => t.tabId === attachedTabId && t.attached)) {
-      return { attached: false, tab: null, debugger: 'none', browser: BROWSER_NAME };
+      return { attached: false, tab: null, debugger: 'none', browser: BROWSER_NAME, ...activityInfo() };
     }
     const tab = await chrome.tabs.get(attachedTabId);
     return {
@@ -180,9 +341,10 @@ async function getBrowserState() {
       tab: { id: tab.id, title: tab.title, url: tab.url, incognito: Boolean(tab.incognito) },
       debugger: 'attached',
       browser: BROWSER_NAME,
+      ...activityInfo(),
     };
   } catch {
-    return { attached: false, tab: null, debugger: 'none', browser: BROWSER_NAME };
+    return { attached: false, tab: null, debugger: 'none', browser: BROWSER_NAME, ...activityInfo() };
   }
 }
 
@@ -198,6 +360,14 @@ async function broadcastBrowserState() {
 // ── Attach / detach ──────────────────────────────────────────────
 
 async function attachTab(tabId) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (tab && isInternalTab(tab)) {
+    return {
+      ok: false,
+      error: 'TAB_INTERNAL',
+      message: 'chrome.debugger cannot attach to browser-internal pages (chrome://, edge://, about: etc.)',
+    };
+  }
   const previous = await getAttachedTabId();
   try {
     await chrome.debugger.attach({ tabId }, '1.3');
@@ -219,7 +389,10 @@ async function attachTab(tabId) {
     const tab = await chrome.tabs.get(tabId);
     info = { id: tab.id, title: tab.title, url: tab.url, incognito: Boolean(tab.incognito) };
   } catch {}
-  await chrome.storage.local.set({ attachedTabId: tabId, lastAttached: info });
+  await chrome.storage.local.set({ attachedTabId: tabId });
+  // B2: tell the hub the attach landed so it can reset refs/buffers and
+  // enable CDP domains for the new tab.
+  wsSend({ cmd: 'attach', tabId, tab: info || { id: tabId } });
   updateKeepAlive();
   broadcastBrowserState();
   return { ok: true, tab: info };
@@ -240,28 +413,14 @@ async function clearAttached(tabId) {
   }
 }
 
-// ── Auto-attach: follow the user's current tab ───────────────────
-// After pairing, and on every tab switch, attach the debugger to the
-// active tab so the hub always drives the tab the user is looking at.
-async function autoAttachToActiveTab(reason) {
-  if (!paired || !ws || ws.readyState !== WebSocket.OPEN) return; // bridge down
-  const current = await getAttachedTabId();
-  let active = null;
-  try {
-    [active] = await chrome.tabs.query({ active: true, currentWindow: true });
-  } catch {}
-  if (!active || active.id === current) return;
-  const res = await attachTab(active.id);
-  if (!res.ok) {
-    // TAB_BUSY (DevTools open) is expected; retried on the next tab event.
-    console.log(`auto-attach(${reason}): tab ${active.id} — ${res.error}`);
-  }
-}
-
-chrome.tabs.onActivated.addListener(() => autoAttachToActiveTab('activated'));
-chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
-  if (changeInfo.status === 'complete') autoAttachToActiveTab('updated');
-});
+// ── Auto-follow: REMOVED (demand-only debugger) ──────────────────
+// The old behavior attached the debugger on pairing and on every tab
+// switch / page load so the hub always drove the focused tab. That
+// re-showed Chrome's "started debugging this browser" banner with zero
+// agent activity (and re-attached right after the user clicked Cancel).
+// Now the debugger attaches ONLY when the hub asks (a tool call) or the
+// user clicks Attach in the sidepanel — and auto-detaches when idle
+// (see the keep-alive alarm below).
 
 // chrome.debugger events are forwarded to the hub (consumed from B2 on:
 // epoch invalidation, console/network buffers). Keyed by the ACTIVE tab:
@@ -284,11 +443,13 @@ chrome.debugger.onDetach.addListener(async (source, reason) => {
   broadcastBrowserState();
 });
 
-// ── Keep-alive ───────────────────────────────────────────────────
+// ── Keep-alive + idle release ────────────────────────────────────
 
 // The SW dies after ~30 s idle; an attached-but-quiet tab produces no CDP
 // events, so a chrome.alarms tick (min 30 s) keeps it alive and pings the
-// hub. Only armed while at least one tab is attached.
+// hub. Only armed while at least one tab is attached. The same tick also
+// enforces the idle release: no hub command for IDLE_DETACH_MS → detach
+// the debugger (banner gone; the hub re-attaches on the next tool call).
 async function updateKeepAlive() {
   const tabId = await getAttachedTabId();
   if (tabId != null) {
@@ -298,8 +459,20 @@ async function updateKeepAlive() {
   }
 }
 
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === KEEPALIVE_ALARM) wsSend({ cmd: 'ping' });
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== KEEPALIVE_ALARM) return;
+  if (Date.now() - lastHubActivity >= IDLE_DETACH_MS) {
+    const tabId = await getAttachedTabId();
+    if (tabId == null) return;
+    console.log('idle release: no hub command for %ss — detaching debugger from tab %s',
+      IDLE_DETACH_MS / 1000, tabId);
+    await detachTab(tabId);
+    // detachTab doesn't notify the hub (the hub-side tabs detach clears its
+    // own state from the reply) — extension-initiated detaches must say so.
+    wsSend({ cmd: 'detach', tabId, reason: 'idle' });
+    return;
+  }
+  wsSend({ cmd: 'ping' });
 });
 
 // ── sidepanel messaging ──────────────────────────────────────────

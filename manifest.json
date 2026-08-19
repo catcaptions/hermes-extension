@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Hermes Minimal",
   "short_name": "Hermes",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Bare-minimum ChatGPT-style side panel for local Hermes Agent.",
   "minimum_chrome_version": "114",
   "icons": {

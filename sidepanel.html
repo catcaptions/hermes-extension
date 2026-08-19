@@ -17,24 +17,37 @@
           <path d="M3 4.5 L6 7.5 L9 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
       </button>
-      <button id="btn-browser" class="browser-chip" type="button" title="Browser bridge — click to show the tab picker">
+      <!-- Browser chip (hidden from header, accessible via menu) -->
+      <button id="btn-browser" class="browser-chip hidden" type="button" title="Browser bridge — click to show the tab picker">
         <span id="browser-dot" class="browser-dot"></span>
         <span id="browser-chip-text" class="browser-chip-text">browser…</span>
       </button>
       <div class="header-actions">
-        <button id="btn-new" class="icon-btn" type="button" title="New chat" aria-label="New chat">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-            <path d="M12 5v14M5 12h14"/>
-          </svg>
-        </button>
-        <button id="btn-settings" class="icon-btn" type="button" title="Settings" aria-label="Settings">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="3"/>
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        <button id="btn-menu" class="icon-btn" type="button" title="Menu" aria-label="Menu" aria-haspopup="menu" aria-expanded="false" aria-controls="quick-menu">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <circle cx="12" cy="5" r="1.5"/>
+            <circle cx="12" cy="12" r="1.5"/>
+            <circle cx="12" cy="19" r="1.5"/>
           </svg>
         </button>
       </div>
     </header>
+
+    <!-- Quick menu dropdown -->
+    <div id="quick-menu" class="quick-menu hidden" role="menu" aria-label="Options">
+      <button id="btn-new" class="quick-menu-item" type="button" role="menuitem">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        New chat
+      </button>
+      <button id="btn-browser-menu" class="quick-menu-item" type="button" role="menuitem">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+        Browser bridge
+      </button>
+      <button id="btn-settings" class="quick-menu-item" type="button" role="menuitem">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        Settings
+      </button>
+    </div>
 
     <!-- Session picker dropdown -->
     <div id="session-menu" class="dropdown hidden" role="listbox" aria-label="Sessions">
@@ -61,10 +74,6 @@
         Key from <code>~/.hermes/.env</code> → <code>API_SERVER_KEY</code>
         (or <code>config.yaml</code> → <code>api_server.key</code>).
       </p>
-      <label class="toggle-row" title="Coming later — no-op in v1">
-        <span>Browser use <em class="soon">(soon)</em></span>
-        <input id="cfg-browser-use" type="checkbox" disabled />
-      </label>
       <div class="settings-actions">
         <button id="btn-test" class="secondary-btn" type="button">Test connection</button>
         <button id="btn-save" class="primary-btn" type="button">Save</button>
@@ -73,25 +82,29 @@
       <button id="btn-close-settings" class="text-btn" type="button">← Back to chat</button>
     </div>
 
-    <!-- Browser-use panel (TASK_BRIEF_B1): tab picker + bridge controls -->
+    <!-- Browser-use panel: agent-session card (attachment is agent-driven)
+         + kill switch; manual attach & pairing live under Advanced -->
     <section id="browser-panel" class="browser-panel hidden" aria-label="Browser bridge">
       <div class="browser-panel-head">
-        <span class="browser-panel-title">Browser</span>
+        <span class="browser-panel-title">Browser bridge</span>
         <button id="btn-browser-refresh" class="text-btn" type="button">Refresh</button>
         <button id="btn-browser-collapse" class="text-btn" type="button">Hide</button>
       </div>
-      <div id="browser-tabs" class="browser-tabs"></div>
+      <div id="browser-status" class="browser-status"></div>
       <div class="browser-actions">
+        <button id="btn-browser-disconnect" class="danger-btn" type="button">Disconnect agent</button>
+      </div>
+      <button id="btn-browser-advanced" class="browser-advanced-toggle" type="button" aria-expanded="false" aria-controls="browser-advanced">▸ Advanced — manual attach &amp; pairing</button>
+      <div id="browser-advanced" class="browser-advanced hidden">
+        <div id="browser-tabs" class="browser-tabs"></div>
         <button id="btn-browser-reset-pairing" class="text-btn" type="button" title="Clear the stored token and re-pin this browser on the hub (recovery from a 4401 pairing lockout)">Reset pairing</button>
-        <button id="btn-browser-disconnect" class="danger-btn" type="button">Disconnect</button>
       </div>
     </section>
 
     <!-- Messages -->
     <main id="messages" class="messages" aria-live="polite">
       <div id="empty-state" class="empty-state">
-        <img src="icons/icon-128.png" alt="" class="empty-logo" width="48" height="48" />
-        <p>Chat with Hermes</p>
+        <img src="icons/icon-128.png" alt="" class="empty-logo" width="44" height="44" />
       </div>
     </main>
 
@@ -101,28 +114,48 @@
     <!-- Composer -->
     <footer class="composer-wrap">
       <form id="composer" class="composer" autocomplete="off">
+        <div id="queue-strip" class="queue-strip hidden" title="Queued messages — sent automatically when the current run finishes"></div>
         <div id="attach-strip" class="attach-strip hidden"></div>
-        <textarea
-          id="prompt"
-          rows="1"
-          placeholder="Message Hermes…"
-          enterkeyhint="send"
-        ></textarea>
-        <button id="btn-send" class="send-btn" type="submit" title="Send" aria-label="Send" disabled>
-          <svg class="icon-send" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M12 4l8 8-1.4 1.4L13 7.8V20h-2V7.8L5.4 13.4 4 12z"/>
-          </svg>
-          <svg class="icon-stop" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <rect x="6" y="6" width="12" height="12" rx="2"/>
-          </svg>
-        </button>
+        <div class="composer-row">
+          <textarea
+            id="prompt"
+            rows="1"
+            placeholder="Do anything"
+            enterkeyhint="send"
+          ></textarea>
+        </div>
+        <div class="composer-toolbar">
+          <div class="composer-toolbar-left">
+            <button id="btn-attach" class="composer-icon-btn" type="button" title="Attach file" aria-label="Attach file">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 5v14M5 12h14"/>
+              </svg>
+            </button>
+            <!-- Permanent file input: Chrome side panels ignore click() on detached inputs -->
+            <input id="attach-input" type="file" multiple accept="*/*" hidden />
+          </div>
+          <div class="composer-toolbar-right">
+            <button id="btn-model" class="model-pill" type="button" title="Model" aria-label="Switch model">model…</button>
+            <button id="btn-send" class="send-btn" type="submit" title="Send" aria-label="Send" disabled>
+              <svg class="icon-send" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M3.478 2.404a.75.75 0 0 0-.926.941l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.404Z"/>
+              </svg>
+              <svg class="icon-stop" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <rect x="6" y="6" width="12" height="12" rx="2"/>
+              </svg>
+              <svg class="icon-steer" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="8"/>
+                <circle cx="12" cy="12" r="2.2"/>
+                <path d="M12 4v5M12 15v5M4 12h5M15 12h5M6.2 6.2l3.3 3.3M14.5 14.5l3.3 3.3M17.8 6.2l-3.3 3.3M9.5 14.5l-3.3 3.3"/>
+              </svg>
+            </button>
+          </div>
+        </div>
       </form>
-      <div class="composer-meta">
-        <button id="btn-model" class="model-pill" type="button" title="Model" aria-label="Switch model">model…</button>
-        <span id="conn-dot" class="dot offline" title="Not connected"></span>
-        <span id="conn-label">Not connected</span>
-        <span id="version-badge" class="version-badge"></span>
-      </div>
+      <!-- Hidden connection state for JS access -->
+      <span id="conn-dot" class="dot offline hidden" title="Not connected"></span>
+      <span id="conn-label" class="hidden">Not connected</span>
+      <span id="version-badge" class="version-badge hidden"></span>
     </footer>
 
     <!-- Attachment preview overlay -->

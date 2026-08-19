@@ -14,8 +14,8 @@
   --accent-fg: #ffffff;
   --danger: #c62828;
   --ok: #1b7f3a;
-  --radius: 16px;
-  --radius-sm: 10px;
+  --radius: 20px;
+  --radius-sm: 12px;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
@@ -56,8 +56,7 @@ code {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px;
-  border-bottom: 1px solid transparent;
+  padding: 12px 14px;
   flex-shrink: 0;
   z-index: 5;
   background: var(--bg);
@@ -66,18 +65,19 @@ code {
 .session-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   max-width: 70%;
   padding: 6px 10px;
   border-radius: 8px;
   border: none;
   background: transparent;
   color: var(--text);
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 .session-btn:hover { background: var(--bg-hover); }
-.session-btn .chevron { color: var(--text-muted); flex-shrink: 0; }
+.session-btn .chevron { color: var(--text-muted); flex-shrink: 0; transition: transform 0.2s; }
 #session-title {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -107,6 +107,46 @@ code {
   height: 34px;
 }
 .icon-btn:hover, .ghost-btn:hover { background: var(--bg-hover); color: var(--text); }
+
+/* ── Quick menu ─────────────────────────────────────── */
+
+.quick-menu {
+  /* fixed: stay above the scrolling messages flex item (absolute was easy to bury) */
+  position: fixed;
+  top: 48px;
+  right: 12px;
+  min-width: 180px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(0,0,0,0.12);
+  z-index: 50;
+  padding: 4px;
+  animation: qm-in 0.15s ease-out;
+}
+.quick-menu.hidden { display: none; }
+
+@keyframes qm-in {
+  from { opacity: 0; transform: translateY(-6px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.quick-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+}
+.quick-menu-item:hover { background: var(--bg-hover); }
+.quick-menu-item svg { color: var(--text-muted); flex-shrink: 0; }
 
 /* ── Dropdown (sessions) ────────────────────────────── */
 
@@ -241,20 +281,6 @@ code {
   line-height: 1.45;
 }
 
-.toggle-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 0;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 16px;
-  font-size: 13px;
-  color: var(--text-muted);
-  cursor: not-allowed;
-}
-.soon { font-style: normal; color: var(--text-faint); font-size: 11px; margin-left: 4px; }
-
 .settings-actions {
   display: flex;
   gap: 8px;
@@ -314,6 +340,7 @@ code {
   overflow: hidden;
 }
 .browser-chip:hover { background: var(--bg-hover); color: var(--text); }
+.browser-chip.hidden { display: none; }
 
 .browser-dot {
   flex: none;
@@ -325,6 +352,18 @@ code {
 .browser-chip.state-on .browser-dot { background: var(--ok); }
 .browser-chip.state-attn .browser-dot { background: #b58900; }
 .browser-chip.state-off .browser-dot { background: var(--danger); }
+/* Demand-only debugger: connected + idle is the healthy resting state, not
+   a fault — dim green instead of the old amber. */
+.browser-chip.state-ready .browser-dot { background: var(--ok); opacity: .45; }
+/* Agent actively driving: the dot pulses while hub commands keep arriving. */
+.browser-chip.driving .browser-dot {
+  animation: browser-dot-pulse 1.2s ease-in-out infinite;
+  opacity: 1;
+}
+@keyframes browser-dot-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.4); opacity: .5; }
+}
 
 .browser-chip-text {
   overflow: hidden;
@@ -435,6 +474,50 @@ code {
 }
 .danger-btn:hover { background: var(--danger); color: #fff; }
 
+/* Agent-session card: what the agent is doing with the browser right now. */
+.browser-status {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-soft);
+}
+.browser-status.state-on { border-left-color: var(--ok); }
+.browser-status.state-off { border-left-color: var(--danger); }
+.browser-status-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.browser-status-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+/* Advanced disclosure: manual attach / pairing recovery (agent normally
+   attaches tabs itself — this is the override). */
+.browser-advanced-toggle {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  border: none;
+  background: none;
+  padding: 4px 2px;
+  text-align: left;
+  font-size: 12px;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+.browser-advanced-toggle:hover { color: var(--text); }
+.browser-advanced .browser-tabs { margin-top: 6px; }
+.browser-advanced .text-btn { margin-top: 6px; }
+
 /* ── Messages ───────────────────────────────────────── */
 
 .messages {
@@ -457,7 +540,7 @@ code {
 }
 .empty-state.hidden { display: none; }
 .empty-logo {
-  opacity: 0.28;
+  opacity: 0.22;
   filter: grayscale(1);
 }
 .empty-state p {
@@ -558,7 +641,7 @@ code {
   text-align: left;
 }
 .msg-body th { background: var(--bg-soft); font-weight: 600; }
-.msg-body img.hm-img {
+.msg-body img {
   display: block;
   max-width: 100%;
   height: auto;
@@ -592,7 +675,7 @@ code {
 
 .msg.user .msg-body {
   background: var(--user-bg);
-  border-radius: 14px;
+  border-radius: 18px;
   padding: 10px 14px;
   display: block;
   max-width: 100%;
@@ -617,6 +700,43 @@ code {
   padding: 10px 12px;
 }
 
+.hm-activity { display: flex; flex-direction: column; gap: 4px; margin: 4px 0; }
+.hm-actions { border: none; background: transparent; border-radius: 8px; }
+.hm-actions > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-size: 12px; color: var(--text-muted); border-radius: 6px; user-select: none; }
+.hm-actions > summary::-webkit-details-marker { display: none; }
+.hm-actions > summary::before { content: "›"; display: inline-block; transition: transform 0.15s; font-size: 13px; line-height: 1; }
+.hm-actions[open] > summary::before { transform: rotate(90deg); }
+.hm-actions-label { font-weight: 600; color: var(--text-muted); white-space: nowrap; }
+.hm-actions-preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); font-weight: 400; }
+.hm-actions-chevron { color: var(--text-faint); font-size: 11px; }
+.hm-actions[open] .hm-actions-chevron { transform: rotate(180deg); }
+.hm-actions-body { padding: 4px 0 2px 6px; display: flex; flex-direction: column; gap: 2px; }
+.hm-action-row { display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-size: 12px; color: var(--text-muted); border-radius: 6px; line-height: 1.35; }
+.hm-action-title { font-weight: 500; white-space: nowrap; color: var(--text-muted); }
+.hm-action-sub { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); }
+.hm-action-detail { margin-top: 2px; }
+.hm-thought { display: block; padding: 2px 6px; font-size: 12px; color: var(--text-muted); background: transparent; border: none; border-radius: 6px; }
+.hm-thought summary { cursor: pointer; font-weight: 500; font-size: 12px; color: var(--text-muted); list-style: none; display: inline-flex; align-items: center; gap: 4px; }
+.hm-thought summary::-webkit-details-marker { display: none; }
+.hm-tools { display: flex; flex-direction: column; gap: 2px; }
+.hm-tool { display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-size: 12px; color: var(--text-muted); background: transparent; border: none; border-radius: 6px; line-height: 1.35; }
+.hm-tool-head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 400; color: var(--text-muted); flex: 1; min-width: 0; }
+.hm-tool-dot { width: 5px; height: 5px; border-radius: 50%; flex: none; background: var(--text-faint); }
+.hm-tool-dot.running { background: #f59e0b; animation: pulse 1.2s ease-in-out infinite; }
+.hm-tool-dot.done { background: var(--ok); opacity: 0.9; }
+.hm-tool-dot.error { background: var(--danger); }
+.hm-tool-title { flex: none; font-weight: 500; color: var(--text-muted); white-space: nowrap; }
+.hm-tool-sub { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text-faint); font-weight: 400; }
+.hm-diff { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg-soft); }
+.hm-diff-head { padding: 6px 10px; font-size: 11px; font-weight: 600; color: var(--text-muted); border-bottom: 1px solid var(--border); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hm-diff pre { margin: 0; padding: 8px 10px; font-family: var(--mono); font-size: 11.5px; line-height: 1.5; overflow-x: auto; max-height: 220px; white-space: pre-wrap; word-break: break-word; }
+.hm-diff pre[data-collapsed="1"] { max-height: 96px; overflow: hidden; }
+.hm-diff .d-add { background: #e6ffec; display: block; }
+.hm-diff .d-del { background: #ffebe9; display: block; }
+.hm-diff .d-hunk { color: #6e7781; display: block; font-weight: 600; }
+.hm-skill { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg-soft); font-size: 11px; color: var(--text-muted); }
+.hm-activity-empty { font-size: 12px; color: var(--text-faint); padding: 6px 2px; }
+
 /* ── Banner ─────────────────────────────────────────── */
 
 .banner {
@@ -638,32 +758,53 @@ code {
 
 .composer-wrap {
   flex-shrink: 0;
-  padding: 8px 12px 12px;
+  padding: 8px 12px 16px;
   background: var(--bg);
 }
 
 .composer {
   display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 8px;
-  padding: 10px 10px 10px 14px;
+  flex-direction: column;
+  gap: 0;
+  padding: 12px 14px 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg);
-  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.04);
   transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.composer:focus-within {
+  border-color: #c8c8c8;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.06);
 }
 
 /* Attachment chip strip (pasted/dropped images) */
 .attach-strip {
   display: flex;
   gap: 8px;
-  flex: 1 1 100%;
   overflow-x: auto;
-  padding-bottom: 6px;
+  padding-bottom: 8px;
 }
 .attach-strip.hidden { display: none; }
+
+/* /queue: messages waiting for the current run to finish. */
+.queue-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+}
+.queue-strip.hidden { display: none; }
+.queue-chip-text {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 0 4px;
+}
 .chip {
   position: relative;
   display: flex;
@@ -705,13 +846,13 @@ code {
   flex-shrink: 0;
 }
 .chip-x:hover { color: var(--text); background: var(--bg); }
-.composer:focus-within {
-  border-color: #c8c8c8;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+
+.composer-row {
+  flex: 1;
 }
 
 #prompt {
-  flex: 1;
+  width: 100%;
   border: none;
   outline: none;
   resize: none;
@@ -722,13 +863,48 @@ code {
   color: var(--text);
   max-height: 140px;
   min-height: 22px;
-  padding: 2px 0;
+  padding: 0;
 }
 #prompt::placeholder { color: var(--text-faint); }
 
+/* Toolbar row: attach left, model + send right */
+.composer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 6px;
+}
+
+.composer-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.composer-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.composer-icon-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+.composer-icon-btn:hover { background: var(--bg-hover); color: var(--text); }
+
 .send-btn {
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
   border: none;
   background: var(--accent);
@@ -748,41 +924,30 @@ code {
   cursor: pointer;
 }
 .send-btn .icon-stop { display: none; }
+.send-btn .icon-steer { display: none; }
 .send-btn.busy .icon-send { display: none; }
-.send-btn.busy .icon-stop { display: block; }
-
-.composer-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 4px 0;
-  font-size: 11px;
-  color: var(--text-faint);
-}
-.version-badge {
-  margin-left: auto;
-  opacity: 0.55;
-  white-space: nowrap;
-}
+.send-btn.busy:not(.steer-ready) .icon-stop { display: block; }
+.send-btn.busy.steer-ready .icon-stop { display: none; }
+.send-btn.busy.steer-ready .icon-steer { display: block; }
 
 /* Model switcher pill (TASK_BRIEF_11) */
 .model-pill {
-  border: 1px solid var(--border);
+  border: none;
   border-radius: 999px;
   background: transparent;
-  color: var(--text-muted);
-  font-size: 11px;
+  color: var(--text-faint);
+  font-size: 12px;
   font-family: inherit;
   line-height: 1.6;
-  padding: 0 9px;
-  max-width: 160px;
+  padding: 2px 8px;
+  max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
   flex-shrink: 1;
 }
-.model-pill:hover { background: var(--bg-hover); color: var(--text); }
+.model-pill:hover { background: var(--bg-hover); color: var(--text-muted); }
 .model-free {
   margin-left: 4px;
   padding: 0 5px;
@@ -792,6 +957,9 @@ code {
   font-size: 10px;
   font-weight: 600;
 }
+
+/* Hidden connection state (still accessible to JS) */
+.hidden { display: none; }
 
 /* Attachment preview overlay */
 .preview {
@@ -923,7 +1091,8 @@ body.settings-open .header,
 body.settings-open .messages,
 body.settings-open .composer-wrap,
 body.settings-open .banner,
-body.settings-open .dropdown {
+body.settings-open .dropdown,
+body.settings-open .quick-menu {
   display: none !important;
 }
 body.settings-open .settings { display: block; }
