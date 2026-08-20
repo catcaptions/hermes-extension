@@ -1307,12 +1307,39 @@ function renderMessageBody(msg) {
   renderActivityBlocks(msg);
 }
 
+let streamRaf = null;
+let lastStreamRender = 0;
 function scheduleStreamingRender(msg) {
-  clearTimeout(streamTimer);
-  streamTimer = setTimeout(() => {
+  // ponytail: coalesce streaming re-renders to the browser's paint (rAF) + 60 ms throttle
+  if (streamRaf != null) return; // already queued — next frame will pick up latest content
+  const doRender = () => {
+    streamRaf = null;
+    const now = Date.now();
+    const since = now - lastStreamRender;
+    if (since < STREAM_RENDER_MS) {
+      // Throttle: too soon since last paint — delay remainder then render
+      streamTimer = setTimeout(() => {
+        lastStreamRender = Date.now();
+        renderMessageBody(msg);
+        scrollToBottomIfNear();
+      }, STREAM_RENDER_MS - since);
+      return;
+    }
+    lastStreamRender = now;
     renderMessageBody(msg);
-    scrollToBottomIfNear(); // keep the caret in view while the reply grows
-  }, STREAM_RENDER_MS);
+    scrollToBottomIfNear();
+  };
+  clearTimeout(streamTimer);
+  if (typeof requestAnimationFrame === 'function') {
+    streamRaf = requestAnimationFrame(doRender);
+  } else {
+    streamTimer = setTimeout(doRender, STREAM_RENDER_MS);
+  }
+}
+function cancelStreamingRender() {
+  if (streamRaf != null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(streamRaf);
+  streamRaf = null;
+  clearTimeout(streamTimer);
 }
 
 function scrollToBottomIfNear(threshold = 60) {
@@ -1322,21 +1349,37 @@ function scrollToBottomIfNear(threshold = 60) {
 }
 
 function renderMessages() {
-  // Keep empty state node; rebuild the rest.
-  const kids = [...els.messages.children].filter((n) => n !== els.emptyState);
-  for (const n of kids) n.remove();
-
   const has = messages.length > 0;
   els.emptyState.classList.toggle('hidden', has);
 
-  for (const msg of messages) {
-    const div = document.createElement('div');
-    div.className = `msg ${msg.role}${msg.streaming ? ' streaming' : ''}${msg.error ? ' error' : ''}`;
+  // ponytail: incremental diff — reuse existing DOM nodes instead of tearing all down
+  // Keeps _failedImgs/_bridged/_renderKey/_activity on reused nodes; only appends/removes delta
+  const kids = [...els.messages.children].filter((n) => n !== els.emptyState);
+  // Remove excess nodes if messages shrank (e.g. poll adopted shorter history)
+  while (kids.length > messages.length) {
+    const extra = kids.pop();
+    extra.remove();
+  }
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    let div = kids[i];
+    const cls = `msg ${msg.role}${msg.streaming ? ' streaming' : ''}${msg.error ? ' error' : ''}`;
     const roleLabel = msg.error ? 'Error' : msg.role === 'user' ? 'You' : 'Hermes';
-    div.innerHTML = `<div class="msg-role">${escapeHtml(roleLabel)}</div><div class="hm-activity" style="display:none"></div><div class="msg-body"></div>`;
-    msg._el = div;
-    els.messages.appendChild(div);
-    renderMessageBody(msg);
+    if (div) {
+      // Reuse existing node — update class/role if changed, rebind msg._el
+      if (div.className !== cls) div.className = cls;
+      const roleEl = div.querySelector('.msg-role');
+      if (roleEl && roleEl.textContent !== roleLabel) roleEl.textContent = roleLabel;
+      msg._el = div;
+      renderMessageBody(msg);
+    } else {
+      div = document.createElement('div');
+      div.className = cls;
+      div.innerHTML = `<div class="msg-role">${escapeHtml(roleLabel)}</div><div class="hm-activity" style="display:none"></div><div class="msg-body"></div>`;
+      msg._el = div;
+      els.messages.appendChild(div);
+      renderMessageBody(msg);
+    }
   }
   scrollToBottomIfNear();
 }
@@ -2503,7 +2546,7 @@ async function beginNewChat() {
   // Abort any in-flight stream so starting fresh never blocks (TASK_BRIEF_5).
   if (sending) {
     abortController?.abort();
-    clearTimeout(streamTimer);
+    cancelStreamingRender();
     setSending(false);
   }
   closeSessionMenu();
@@ -2546,7 +2589,7 @@ async function selectSession(id, title) {
   // The gateway run continues server-side and shows up via the poll.
   if (sending) {
     abortController?.abort();
-    clearTimeout(streamTimer);
+    cancelStreamingRender();
     setSending(false);
   }
   closeSessionMenu();
@@ -2854,7 +2897,7 @@ async function sendMessage(text) {
       },
     });
 
-    clearTimeout(streamTimer);
+    cancelStreamingRender();
     assistantMsg.content = finalText || assistantMsg.content || '';
     const act = assistantMsg._activity;
     const hasAct = Boolean(act && (String(act.thought || '').trim() || (act.tools && act.tools.length) || (act.diffs && act.diffs.length) || (act.skills && act.skills.length) || (act.unknown && act.unknown.length)));
@@ -2889,7 +2932,7 @@ async function sendMessage(text) {
       }
       setConnection('offline', 'Error');
     }
-    clearTimeout(streamTimer);
+    cancelStreamingRender();
     syncPollState();
     renderMessages();
   } finally {
