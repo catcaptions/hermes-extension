@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="360" viewBox="0 0 720 360" font-family="Segoe UI, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#5b8def"/>
+    </marker>
+  </defs>
+
+  <rect x="20" y="20" width="240" height="110" rx="10" fill="#f2f6ff" stroke="#5b8def" stroke-width="2"/>
+  <text x="140" y="45" text-anchor="middle" font-weight="bold" fill="#1a2b4a">Chrome / Edge</text>
+  <text x="140" y="68" text-anchor="middle" fill="#3a4a66">Hermes Minimal</text>
+  <text x="140" y="86" text-anchor="middle" fill="#3a4a66">sidepanel.js · background.js</text>
+  <text x="140" y="104" text-anchor="middle" fill="#3a4a66">marked + DOMPurify + KaTeX</text>
+
+  <rect x="340" y="20" width="240" height="110" rx="10" fill="#e9f7ef" stroke="#2e9e5b" stroke-width="2"/>
+  <text x="460" y="45" text-anchor="middle" font-weight="bold" fill="#0f3d24">Hermes Gateway</text>
+  <text x="460" y="68" text-anchor="middle" fill="#2a5a3f">127.0.0.1:8642 · HTTP + SSE</text>
+  <text x="460" y="86" text-anchor="middle" fill="#2a5a3f">sessions · chat/stream</text>
+  <text x="460" y="104" text-anchor="middle" fill="#2a5a3f">models · skills · tools</text>
+
+  <rect x="20" y="220" width="240" height="110" rx="10" fill="#f4effb" stroke="#8b5bd9" stroke-width="2"/>
+  <text x="140" y="245" text-anchor="middle" font-weight="bold" fill="#3a1f66">media-bridge.py</text>
+  <text x="140" y="268" text-anchor="middle" fill="#5b3f8a">127.0.0.1:8643</text>
+  <text x="140" y="286" text-anchor="middle" fill="#5b3f8a">serves local files to the panel</text>
+  <text x="140" y="304" text-anchor="middle" fill="#5b3f8a">images · audio · video</text>
+
+  <rect x="340" y="220" width="240" height="110" rx="10" fill="#fdf3e3" stroke="#d99a2b" stroke-width="2"/>
+  <text x="460" y="245" text-anchor="middle" font-weight="bold" fill="#5c3d0a">browser-mcp.py hub</text>
+  <text x="460" y="268" text-anchor="middle" fill="#6b5426">ws://127.0.0.1:8644</text>
+  <text x="460" y="286" text-anchor="middle" fill="#6b5426">MCP tools → chrome.debugger</text>
+  <text x="460" y="304" text-anchor="middle" fill="#6b5426">drive your real, logged-in tabs</text>
+
+  <line x1="260" y1="75" x2="335" y2="75" stroke="#5b8def" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="297" y="68" text-anchor="middle" fill="#5b8def" font-size="12">HTTP+SSE</text>
+
+  <line x1="140" y1="130" x2="140" y2="215" stroke="#8b5bd9" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="152" y="178" fill="#8b5bd9" font-size="12">fetch local files</text>
+
+  <path d="M260 115 L260 275 L335 275" fill="none" stroke="#d99a2b" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="278" y="262" fill="#d99a2b" font-size="12">WS 8644</text>
+</svg>

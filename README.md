@@ -1,6 +1,8 @@
 <div align="center">
 
-# ⚡ Hermes Minimal
+<img src="icons/icon-128.png" width="80" alt="Hermes Minimal logo">
+
+# Hermes Minimal
 
 **A bare-minimum ChatGPT-style side panel for your local [Hermes Agent](https://github.com/abundantbeing/hermes-browser-extension) gateway.**
 
@@ -8,8 +10,7 @@ No build step · No frameworks · No content scripts
 
 [![Manifest](https://img.shields.io/badge/Manifest_V3-google_chrome-blue?style=flat-square&logo=googlechrome&logoColor=white)](https://developer.chrome.com/docs/extensions/develop/migrate)
 [![Min Chrome](https://img.shields.io/badge/Chrome-114%2B-4285F4?style=flat-square&logo=googlechrome&logoColor=white)](https://www.google.com/chrome/)
-[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](CONTRIBUTING.md)
+[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](README.md#license)
 
 </div>
 
@@ -20,6 +21,20 @@ No build step · No frameworks · No content scripts
 A tiny Chrome/Edge extension that puts a ChatGPT-clean chat panel in your browser's side panel and talks to a **local Hermes Agent gateway** over plain HTTP + SSE.
 
 The whole extension is **vanilla HTML/CSS/JS with no build step** — the client is `sidepanel.js` plus a small, node-testable `renderer.js`. It was intentionally kept minimal so it's easy to read, audit, and maintain (even for weaker coding models 😉).
+
+## See it in action
+
+<img src="docs/screen-recording.gif" width="300" alt="Hermes Minimal in action">
+
+## Architecture
+
+![How Hermes Minimal fits together](docs/architecture.svg)
+
+The panel is a pure HTTP client of the local **Hermes Gateway** (`127.0.0.1:8642`). For media it talks to the local **media bridge** (`8643`), and for browser use it drives the **browser-use hub** (`8644`).
+
+### Drive your real browser (MCP)
+
+The extension exposes **in-browser browser use** to the agent: through `browser-mcp.py` — an MCP server Hermes connects to — the agent can **see and operate your actual open tabs** (your real profile, cookies, and logins): snapshots with element refs, click/type/fill/navigate/scroll, screenshots, console & network logs, even file uploads. You can watch it drive the page live in the side panel, or let it attach tabs on its own and auto-release them when done. Full details below in [Browser use — live-browser bridge](#browser-use--live-browser-bridge-b1b4).
 
 ## Features
 
@@ -103,6 +118,7 @@ media-bridge.bat    launcher for media-bridge.py
 PROTOCOL.md         live-browser bridge wire protocol (B1–B4)
 vendor/             pinned: marked 12.0.2, DOMPurify 3.1.6, KaTeX 0.16.11 (+ fonts)
 icons/              16/32/48/128
+docs/               screen-recording.gif, architecture.svg (README images)
 Copy_API_Key.cmd    copies API_SERVER_KEY to clipboard
 README.md
 ```
@@ -183,8 +199,8 @@ If you ever do run `python -m py_compile`, you MUST `rm -rf __pycache__` afterwa
 ## Browser use — live-browser bridge (B1–B4)
 
 The extension can drive your **real** open tabs (actual profile, cookies,
-logins) via a local companion server — the browser-use layer (see
-`DESIGN_BROWSER_USE.md`). B1 = transport + pairing + attach UI; B2–B4 add
+logins) via a local companion server — the browser-use layer exposed to Hermes
+as an **MCP server**. B1 = transport + pairing + attach UI; B2–B4 add
 the observe/act tools (snapshot with refs, click/type/fill, navigate,
 screenshots, console/network buffers, tab management).
 
@@ -282,4 +298,4 @@ curl -s -H "Authorization: Bearer KEY" http://127.0.0.1:8642/api/sessions?limit=
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see the project homepage for details.
