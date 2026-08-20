@@ -166,10 +166,25 @@ async function onWsMessage(e) {
 
 // ── Debugger relay ───────────────────────────────────────────────
 
+// ponytail: cache attachedTabId in memory — avoids async storage IPC per CDP call
+let _cachedAttachedTabId = null;
+let _cachedAttachedTabIdReady = false;
+chrome.storage.local.get('attachedTabId').then((s) => {
+  _cachedAttachedTabId = s.attachedTabId != null ? s.attachedTabId : null;
+  _cachedAttachedTabIdReady = true;
+}).catch(() => { _cachedAttachedTabIdReady = true; });
+
 function getAttachedTabId() {
-  return chrome.storage.local.get('attachedTabId').then(
-    (s) => (s.attachedTabId != null ? s.attachedTabId : null)
-  );
+  if (_cachedAttachedTabIdReady) return Promise.resolve(_cachedAttachedTabId);
+  return chrome.storage.local.get('attachedTabId').then((s) => {
+    _cachedAttachedTabId = s.attachedTabId != null ? s.attachedTabId : null;
+    _cachedAttachedTabIdReady = true;
+    return _cachedAttachedTabId;
+  });
+}
+function setCachedAttachedTabId(v) {
+  _cachedAttachedTabId = v;
+  _cachedAttachedTabIdReady = true;
 }
 
 async function handleCdp(msg) {
@@ -390,6 +405,7 @@ async function attachTab(tabId) {
     info = { id: tab.id, title: tab.title, url: tab.url, incognito: Boolean(tab.incognito) };
   } catch {}
   await chrome.storage.local.set({ attachedTabId: tabId });
+  setCachedAttachedTabId(tabId);
   // B2: tell the hub the attach landed so it can reset refs/buffers and
   // enable CDP domains for the new tab.
   wsSend({ cmd: 'attach', tabId, tab: info || { id: tabId } });
@@ -410,6 +426,7 @@ async function clearAttached(tabId) {
   const current = await getAttachedTabId();
   if (tabId == null || current === tabId) {
     await chrome.storage.local.set({ attachedTabId: null });
+    setCachedAttachedTabId(null);
   }
 }
 

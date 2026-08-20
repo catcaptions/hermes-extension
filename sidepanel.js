@@ -961,18 +961,30 @@ function basename(path) {
   return String(path).split(/[\\/]/).pop() || path;
 }
 
+// ponytail: memoize KaTeX — same formula often repeats while streaming
+const mathCache = new Map(); // key: tex\0display -> html, LRU cap 500
 function mathHtml(item) {
   if (!item) return '';
+  const key = `${item.tex}\0${item.display ? '1' : '0'}`;
+  const cached = mathCache.get(key);
+  if (cached !== undefined) return cached;
+  let out;
   try {
-    return katex.renderToString(item.tex, {
+    out = katex.renderToString(item.tex, {
       throwOnError: false,
       displayMode: Boolean(item.display),
       output: 'html',
     });
   } catch {
     // KaTeX never throws with throwOnError:false, but never break a message.
-    return escapeHtml(item.tex);
+    out = escapeHtml(item.tex);
   }
+  mathCache.set(key, out);
+  if (mathCache.size > 500) {
+    const first = mathCache.keys().next().value;
+    mathCache.delete(first);
+  }
+  return out;
 }
 
 // Bridge URL for local absolute paths (bridge serves them without the
@@ -1031,10 +1043,20 @@ function fallbackBlockHtml(raw) {
   return `<a class="hm-img-fallback" href="${href}" title="${escapeHtml(raw)}">${escapeHtml(raw)}</a><span class="hm-hint">${escapeHtml(BRIDGE_HINT)}</span>`;
 }
 
+// ponytail: memoize rendered markdown — same text+failed/bridged often repeats (poll + streaming)
+const renderCache = new Map(); // key: text\0failedKey\0bridgedKey -> html, LRU cap 100
+function renderCacheKey(text, failed, bridged) {
+  const fk = failed.size ? [...failed].sort((a, b) => a - b).join(',') : '';
+  const bk = bridged.size ? [...bridged].sort((a, b) => a - b).join(',') : '';
+  return `${text}\0${fk}\0${bk}`;
+}
 function renderMarkdown(text, ctx, tokens) {
-  const { scrubbed, math, media, url, nonce } = tokens || renderer.extractTokens(text || '');
   const failed = ctx?.failed || new Set();
   const bridged = ctx?.bridged || new Set();
+  const key = renderCacheKey(String(text || ''), failed, bridged);
+  const hit = renderCache.get(key);
+  if (hit !== undefined) return hit;
+  const { scrubbed, math, media, url, nonce } = tokens || renderer.extractTokens(text || '');
   let html;
   try {
     html = marked.parse(scrubbed, { gfm: true, breaks: true });
@@ -1061,6 +1083,11 @@ function renderMarkdown(text, ctx, tokens) {
     const u = url[Number(i)];
     return u ? `<a class="hm-url" href="${escapeHtml(u)}" target="_blank" rel="noopener">${escapeHtml(u)}</a>` : '';
   });
+  renderCache.set(key, html);
+  if (renderCache.size > 100) {
+    const first = renderCache.keys().next().value;
+    renderCache.delete(first);
+  }
   return html;
 }
 
@@ -1258,10 +1285,24 @@ function renderMessageBody(msg) {
     body.innerHTML = '';
   } else {
     body.style.display = '';
-    const tokens = renderer.extractTokens(msg.content || '');
-    msg._media = tokens.media;
-    body.innerHTML = renderMarkdown(msg.content, { failed, bridged }, tokens);
-    attachMediaFallbacks(body, msg);
+    // ponytail: per-message memo — skip extractTokens+renderMarkdown when content unchanged
+    const fk = failed.size ? [...failed].sort((a, b) => a - b).join(',') : '';
+    const bk = bridged.size ? [...bridged].sort((a, b) => a - b).join(',') : '';
+    const cacheKey = `${msg.content || ''}\0${fk}\0${bk}`;
+    if (msg._renderKey === cacheKey && msg._renderHtml !== undefined) {
+      body.innerHTML = msg._renderHtml;
+      // tokens.media still needed for fallback error chain
+      if (!msg._media) msg._media = renderer.extractTokens(msg.content || '').media;
+      attachMediaFallbacks(body, msg);
+    } else {
+      const tokens = renderer.extractTokens(msg.content || '');
+      msg._media = tokens.media;
+      const html = renderMarkdown(msg.content, { failed, bridged }, tokens);
+      msg._renderKey = cacheKey;
+      msg._renderHtml = html;
+      body.innerHTML = html;
+      attachMediaFallbacks(body, msg);
+    }
   }
   renderActivityBlocks(msg);
 }
