@@ -827,22 +827,34 @@ function loadImageEl(dataUrl) {
   });
 }
 
-// Downscale to ≤MAX_IMAGE_SIDE and ≤MAX_DATA_URL_BYTES (PNG first; JPEG
-// fallback loop for photos/large captures). Never throws — callers fall
-// back to the original data URL on any canvas failure.
+// Downscale to ≤MAX_IMAGE_SIDE and ≤MAX_DATA_URL_BYTES. JPEG photos take the
+// fast path (PNG first for transparency-capable images). Never throws.
 async function downscaleImage(dataUrl) {
   const img = await loadImageEl(dataUrl);
   const scale = Math.min(1, MAX_IMAGE_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
   let w = Math.max(1, Math.round(img.naturalWidth * scale));
   let h = Math.max(1, Math.round(img.naturalHeight * scale));
+  // ponytail: reuse one canvas, JPEG fast path for photos (one encode vs two)
+  const c = document.createElement('canvas');
   const draw = (tw, th, mime, q) => {
-    const c = document.createElement('canvas');
     c.width = tw;
     c.height = th;
     c.getContext('2d').drawImage(img, 0, 0, tw, th);
     return c.toDataURL(mime, q);
   };
+  const mimeHint = /^data:(image\/\w+);/i.exec(dataUrl)?.[1] || '';
+  const isJpeg = mimeHint.toLowerCase() === 'image/jpeg';
   try {
+    if (isJpeg) {
+      let out = draw(w, h, 'image/jpeg', 0.82);
+      let guard = 0;
+      while (out.length > MAX_DATA_URL_BYTES && w > 64 && guard++ < 6) {
+        w = Math.max(1, Math.round(w * 0.7));
+        h = Math.max(1, Math.round(h * 0.7));
+        out = draw(w, h, 'image/jpeg', 0.82);
+      }
+      return out;
+    }
     let out = draw(w, h, 'image/png');
     if (out.length > MAX_DATA_URL_BYTES) {
       out = draw(w, h, 'image/jpeg', 0.82);
@@ -2501,11 +2513,19 @@ async function pollActiveSession() {
   }
 }
 
+function shouldPoll() {
+  return document.visibilityState === 'visible'
+    && !sending
+    && !sessionMissing
+    && Boolean(settings.apiKey && activeSessionId)
+    && els.settingsPanel.classList.contains('hidden');
+}
 function startPolling() {
   if (pollTimer) return;
-  pollTimer = setInterval(pollActiveSession, POLL_INTERVAL_MS);
+  const tick = () => { if (shouldPoll()) pollActiveSession(); };
+  pollTimer = setInterval(tick, POLL_INTERVAL_MS);
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') pollActiveSession();
+    if (document.visibilityState === 'visible' && shouldPoll()) pollActiveSession();
   });
 }
 
@@ -3456,6 +3476,8 @@ async function browserQueryState() {
 }
 
 function loadBrowserTabs() {
+  // ponytail: no need to query tabs when Browser panel is hidden — render will early-return anyway
+  if (els.browserPanel.classList.contains('hidden')) return;
   clearTimeout(browserTabTimer);
   browserTabTimer = setTimeout(async () => {
     try {
@@ -3549,18 +3571,40 @@ function initBrowserUI() {
     chrome.tabs[ev].addListener?.(loadBrowserTabs);
   }
   chrome.tabs.onUpdated?.addListener((_id, info) => {
-    if (info.title !== undefined || info.url !== undefined) loadBrowserTabs();
+    // ponytail: ignore noise (audible/favIcon) — only title/url/status matter
+    if (info.title !== undefined || info.url !== undefined || info.status !== undefined) loadBrowserTabs();
   });
   // State round-trip while the panel is open (driving/idle transitions and
   // fresh lastAction timestamps), plus a local 1 s tick so the idle-release
   // countdown and the driving pulse decay without any messages.
-  browserPollTimer = setInterval(() => {
-    if (!els.browserPanel.classList.contains('hidden')) browserQueryState();
-  }, BROWSER_POLL_MS);
-  setInterval(() => {
-    renderBrowserChip();
-    if (!els.browserPanel.classList.contains('hidden')) renderBrowserStatus();
-  }, BROWSER_TICK_MS);
+  // ponytail: pause Browser timers when panel closed — no wakeups for invisible UI
+  let browserTickTimer = null;
+  const startBrowserTimers = () => {
+    if (browserPollTimer) return;
+    browserPollTimer = setInterval(() => {
+      if (!els.browserPanel.classList.contains('hidden')) browserQueryState();
+    }, BROWSER_POLL_MS);
+    browserTickTimer = setInterval(() => {
+      renderBrowserChip();
+      if (!els.browserPanel.classList.contains('hidden')) renderBrowserStatus();
+    }, BROWSER_TICK_MS);
+  };
+  const stopBrowserTimers = () => {
+    clearInterval(browserPollTimer); browserPollTimer = null;
+    clearInterval(browserTickTimer); browserTickTimer = null;
+  };
+  // Observe Browser panel open/close and start/stop timers accordingly
+  const browserPanelObserver = new MutationObserver(() => {
+    if (els.browserPanel.classList.contains('hidden')) stopBrowserTimers();
+    else { startBrowserTimers(); browserQueryState(); }
+  });
+  browserPanelObserver.observe(els.browserPanel, { attributes: true, attributeFilter: ['class'] });
+  // Start timers only if panel is already open (usually hidden at boot)
+  if (!els.browserPanel.classList.contains('hidden')) startBrowserTimers();
+  else {
+    // Keep chip tick even when panel hidden — cheap local render only
+    browserTickTimer = setInterval(() => { renderBrowserChip(); }, BROWSER_TICK_MS);
+  }
   browserQueryState();
   loadBrowserTabs();
 }
