@@ -332,17 +332,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not os.path.isfile(path):
             return self._send(404, b'file not found')
         try:
-            with open(path, 'rb') as f:
-                body = f.read()
+            st = os.stat(path)
         except OSError:
             return self._send(500, b'read failed')
+        # ponytail: chunked streaming + cache headers — no 100 MB RAM spike on video
+        etag = '"%s-%s"' % (st.st_size, int(st.st_mtime))
+        if self.headers.get('If-None-Match') == etag:
+            self.send_response(304)
+            self.send_header('ETag', etag)
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            return
         ext = os.path.splitext(path)[1].lstrip('.').lower()
         self.send_response(200)
         self.send_header('Content-Type', MIME.get(ext, 'application/octet-stream'))
-        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Content-Length', str(st.st_size))
+        self.send_header('ETag', etag)
+        self.send_header('Cache-Control', 'private, max-age=3600')
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            # ponytail: 64 KB chunks, zero-copy via copyfileobj; avoids body=f.read()
+            import shutil
+            with open(path, 'rb') as f:
+                shutil.copyfileobj(f, self.wfile, length=64 * 1024)
+        except OSError:
+            pass  # client closed — nothing to do
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)

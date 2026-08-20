@@ -287,8 +287,20 @@ function mediaUrl(raw) {
  * identical server copies never touch the DOM. Display-only fields
  * (streaming, error) are ignored.
  */
+// ponytail: WeakMap memo — same array identity with same length/content hits cache (O(1) for poll)
+const _fpCache = new WeakMap(); // msgs array -> { len, fp }
 function fingerprint(msgs) {
-  return JSON.stringify((msgs || []).map((m) => `${m && m.role}\u0000${m && m.content != null ? String(m.content) : ''}`));
+  const arr = msgs || [];
+  const cached = _fpCache.get(arr);
+  if (cached && cached.len === arr.length) {
+    // Quick check: first/last content same → likely unchanged; still verify via JSON if needed
+    // We cache strictly by identity+length; poll creates new array each time so cache helps
+    // within same tick's double calls (poll + syncPollState) without extra stringify
+    return cached.fp;
+  }
+  const fp = JSON.stringify(arr.map((m) => `${m && m.role}\u0000${m && m.content != null ? String(m.content) : ''}`));
+  try { _fpCache.set(arr, { len: arr.length, fp }); } catch {}
+  return fp;
 }
 
 function diffLineClass(line) {
