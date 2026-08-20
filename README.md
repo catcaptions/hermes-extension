@@ -4,7 +4,7 @@
 
 # Hermes Minimal
 
-**A bare-minimum ChatGPT-style side panel for your local [Hermes Agent](https://github.com/abundantbeing/hermes-browser-extension) gateway.**
+**A bare-minimum ChatGPT-style side panel for your local [Hermes Agent](https://github.com/NousResearch/hermes-agent) gateway.**
 
 No build step · No frameworks · No content scripts
 
