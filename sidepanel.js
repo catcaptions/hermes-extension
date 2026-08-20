@@ -1,9 +1,10 @@
 /**
- * Hermes Minimal — ChatGPT-style side panel client.
+ * Hermes Extension — ChatGPT-style side panel client.
  * Talks to local Hermes gateway REST + SSE (no build step).
  */
 
-const STORAGE_KEY = 'hermesMinimal';
+const STORAGE_KEY = 'hermesExtension';
+const LEGACY_STORAGE_KEY = 'hermesMinimal';
 const DEFAULTS = {
   gatewayUrl: 'http://127.0.0.1:8642',
   apiKey: '',
@@ -39,7 +40,7 @@ const BRIDGE_BASE = 'http://127.0.0.1:8643';
 const BRIDGE_HINT = 'local file — start media-bridge.bat, then reload the panel (see README)';
 
 // Hardcoded build stamp so the user can confirm the loaded build at a glance.
-const BUILD_STRING = 'build 2026-08-16 run-control';
+const BUILD_STRING = 'build 2026-08-19 run-control';
 
 // ── DOM ──────────────────────────────────────────────────────────
 
@@ -137,8 +138,15 @@ let promptHistoryDraft = '';
 // ── Storage ──────────────────────────────────────────────────────
 
 async function loadSettings() {
-  const stored = await chrome.storage.local.get(STORAGE_KEY);
+  const stored = await chrome.storage.local.get([STORAGE_KEY, LEGACY_STORAGE_KEY]);
+  if (!stored[STORAGE_KEY] && stored[LEGACY_STORAGE_KEY]) {
+    stored[STORAGE_KEY] = stored[LEGACY_STORAGE_KEY];
+    await chrome.storage.local.set({ [STORAGE_KEY]: stored[LEGACY_STORAGE_KEY] });
+  }
   settings = { ...DEFAULTS, ...(stored[STORAGE_KEY] || {}) };
+  if (!stored[STORAGE_KEY] && !stored[LEGACY_STORAGE_KEY] && !settings.apiKey) {
+    console.info('Hermes Extension: no stored settings — repaste API key if this follows a folder rename (new extension ID wipes storage)');
+  }
   activeSessionId = settings.sessionId || '';
   els.cfgUrl.value = settings.gatewayUrl || DEFAULTS.gatewayUrl;
   els.cfgKey.value = settings.apiKey || '';
@@ -192,6 +200,24 @@ function errorMessage(payload, fallback) {
   return String(v).slice(0, 400);
 }
 
+const PROVIDER_ALIASES = {
+  'opencode': 'opencode-zen',
+  'opencode_zen': 'opencode-zen',
+  'opencode-zen': 'opencode-zen',
+};
+function normalizeProvider(p) {
+  const raw = String(p || '').trim().toLowerCase();
+  if (!raw) return '';
+  return PROVIDER_ALIASES[raw] || raw;
+}
+function normalizeLock(lock) {
+  if (!lock?.model || !lock?.provider) return lock;
+  return { provider: normalizeProvider(lock.provider), model: String(lock.model).trim() };
+}
+function isModelLockMismatch(msg) {
+  return /confirmed model lock runtime mismatch|require_model_lock|Model lock failed/i.test(String(msg || ''));
+}
+
 function rows(payload) {
   if (Array.isArray(payload)) return payload;
   if (Array.isArray(payload?.data)) return payload.data;
@@ -210,18 +236,26 @@ async function listSessions() {
 
 async function createSession(title) {
   const stamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
-  const id = `hermes-min-${stamp}-${Math.random().toString(16).slice(2, 8)}`;
+  const id = `hermes-${stamp}-${Math.random().toString(16).slice(2, 8)}`;
   const body = {
     id,
     title: title || `Chat · ${new Date().toLocaleString()}`,
-    source: 'hermes_minimal',
+    source: 'hermes_extension',
   };
   const res = await hermesFetch('/api/sessions', {
     method: 'POST',
     body: JSON.stringify(body),
   });
   const payload = await readJson(res);
-  if (!res.ok) throw new Error(errorMessage(payload, `Create session failed (${res.status})`));
+  if (!res.ok) {
+    const base = errorMessage(payload, `Create session failed (${res.status})`);
+    const hint = res.status === 403 && !settings.apiKey
+      ? ' — API key missing (folder rename wipes unpacked storage). Re-copy API_SERVER_KEY from ~/.hermes/.env → Settings → Test connection → Save.'
+      : res.status === 403
+        ? ' — gateway rejected the API key. Re-copy API_SERVER_KEY from ~/.hermes/.env → Test connection → Save; if Health OK but still 403, run hermes gateway restart.'
+        : '';
+    throw new Error(`${base}${hint}`);
+  }
   const session = payload.session || payload;
   return {
     id: session.id || id,
@@ -369,10 +403,15 @@ async function testConnection() {
   const res = await hermesFetch('/v1/health');
   const payload = await readJson(res);
   if (!res.ok) throw new Error(errorMessage(payload, `Health check failed (${res.status})`));
-  // Authenticated check
   const res2 = await hermesFetch('/api/sessions?limit=1');
   const payload2 = await readJson(res2);
-  if (!res2.ok) throw new Error(errorMessage(payload2, `Auth failed (${res2.status})`));
+  if (!res2.ok) {
+    const base = errorMessage(payload2, `Auth failed (${res2.status})`);
+    const hint = res2.status === 401 || res2.status === 403
+      ? ' — re-copy API_SERVER_KEY from ~/.hermes/.env → Test connection → Save; if Health OK but still 401/403, run hermes gateway restart.'
+      : '';
+    throw new Error(`${base}${hint}`);
+  }
   return payload;
 }
 
@@ -2152,6 +2191,14 @@ function loadModelPref() {
   } catch {
     stored = null;
   }
+  if (stored?.model && stored?.provider) {
+    const rawProvider = String(stored.provider);
+    const normalized = normalizeLock(stored);
+    if (normalized.provider !== rawProvider) {
+      try { localStorage.setItem(modelPrefKey(), JSON.stringify(normalized)); } catch {}
+    }
+    stored = normalized;
+  }
   modelPref = stored?.model && stored?.provider ? stored : null;
 }
 
@@ -2176,7 +2223,7 @@ function updateModelPill() {
 function modelItem(provider, m, payload) {
   const name = (typeof m === 'string' ? m : String(m?.name || m?.id || '')).trim();
   if (!name) return null;
-  const current = Boolean(payload && (typeof m === 'string' ? m === payload.model : m.name === payload.model) && provider.slug === payload.provider);
+  const current = Boolean(payload && (typeof m === 'string' ? m === payload.model : m.name === payload.model) && normalizeProvider(provider.slug) === normalizeProvider(payload.provider));
   const free = typeof m === 'string'
     ? /free|cheap/i.test(name)
     : /free|cheap/i.test(String(m?.pricing ?? ''));
@@ -2186,7 +2233,7 @@ function modelItem(provider, m, payload) {
     label: name,
     sublabel: free ? 'free' : '',
     group: `${provider.name}${count}`,
-    meta: { provider: provider.slug, model: name, current },
+    meta: { provider: normalizeProvider(provider.slug), model: name, current },
   };
 }
 
@@ -2210,7 +2257,11 @@ async function fetchModelOptions() {
       if (!modelPref?.model && !serverModel?.model) els.btnModel.textContent = 'model?';
       return null;
     }
-    serverModel = { provider: payload?.provider, model: payload?.model };
+    serverModel = normalizeLock({ provider: payload?.provider, model: payload?.model }) || { provider: payload?.provider, model: payload?.model };
+    if (payload?.provider) payload.provider = normalizeProvider(payload.provider);
+    if (Array.isArray(payload?.providers)) {
+      for (const p of payload.providers) if (p?.slug) p.slug = normalizeProvider(p.slug) || p.slug;
+    }
     updateModelPill();
     return payload;
   } catch {
@@ -2268,7 +2319,9 @@ function modelPickerOutsideClick(e) {
 
 async function applyModel(item) {
   if (modelLocking) return; // CRITIQUE_BRIEF_11 #5: re-Enter/click mid-POST is ignored
-  const { provider, model } = item.meta;
+  const raw = item.meta;
+  const normalized = normalizeLock(raw) || raw;
+  const { provider, model } = normalized;
   const prev = modelPref;
   modelPref = { provider, model };
   updateModelPill();
@@ -2288,13 +2341,15 @@ async function applyModel(item) {
       modelPref = prev; // lock not applied server-side — revert the pill
       updateModelPill();
       const payload = await readJson(res);
-      showBanner(errorMessage(payload, `Model lock failed (${res.status})`));
+      const msg = errorMessage(payload, `Model lock failed (${res.status})`);
+      showBanner(msg, isModelLockMismatch(msg) ? 'info' : 'error');
       return; // toast, don't close the popover — the user can retry
     }
   } catch (err) {
     modelPref = prev;
     updateModelPill();
-    showBanner(`Model lock failed: ${err.message || err}`);
+    const msg = `Model lock failed: ${err.message || err}`;
+    showBanner(msg, isModelLockMismatch(msg) ? 'info' : 'error');
     return;
   } finally {
     modelLocking = false;
@@ -2715,7 +2770,8 @@ async function sendMessage(text) {
     // TASK_BRIEF_11: every turn carries the per-session model lock — the
     // stored preference first, else the server-reported current model.
     // Neither known → omit the lock (gateway default, pre-switcher behavior).
-    const lock = modelPref || serverModel;
+    const rawLock = modelPref || serverModel;
+    const lock = normalizeLock(rawLock) || rawLock;
     if (lock?.model && lock?.provider) {
       body.provider = lock.provider;
       body.model = lock.model;
@@ -2737,7 +2793,12 @@ async function sendMessage(text) {
 
     if (!res.ok) {
       const payload = await readJson(res);
-      throw new Error(errorMessage(payload, `Stream failed (${res.status})`));
+      const msg = errorMessage(payload, `Stream failed (${res.status})`);
+      if (isModelLockMismatch(msg)) {
+        showBanner(msg, 'info');
+        throw new Error(msg);
+      }
+      throw new Error(msg);
     }
 
     const finalText = await readHermesSse(res, {
@@ -2769,15 +2830,21 @@ async function sendMessage(text) {
       assistantMsg.content = assistantMsg.content || '(stopped)';
       assistantMsg.streaming = false;
     } else {
+      const mismatch = isModelLockMismatch(err.message || String(err));
       // Drop empty streaming bubble; show error instead. Keep activity bubbles even when content is empty.
       const act2 = assistantMsg._activity;
       const hasAct2 = Boolean(act2 && (String(act2.thought || '').trim() || (act2.tools && act2.tools.length) || (act2.diffs && act2.diffs.length) || (act2.skills && act2.skills.length) || (act2.unknown && act2.unknown.length)));
       if (!assistantMsg.content && !hasAct2) {
-        messages = messages.filter((m) => m !== assistantMsg);
-        messages.push({ role: 'assistant', content: err.message || String(err), error: true });
+        if (mismatch) {
+          messages = messages.filter((m) => m !== assistantMsg);
+          showBanner(err.message || String(err), 'info');
+        } else {
+          messages = messages.filter((m) => m !== assistantMsg);
+          messages.push({ role: 'assistant', content: err.message || String(err), error: true });
+        }
       } else {
         assistantMsg.streaming = false;
-        showBanner(err.message || String(err));
+        showBanner(err.message || String(err), mismatch ? 'info' : 'error');
       }
       setConnection('offline', 'Error');
     }

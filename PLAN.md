@@ -1,4 +1,4 @@
-# PLAN — Hermes Minimal Extension Fix (Markdown / Math / Images / Live Updates)
+# PLAN — Hermes Extension Fix (Markdown / Math / Images / Live Updates)
 
 ## 1. Problem analysis
 

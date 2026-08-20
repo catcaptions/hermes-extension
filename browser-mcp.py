@@ -75,7 +75,7 @@ POLL_MS = 0.25                  # wait-poll interval
 # LIVE BROWSER, not a headless instance (DESIGN_BROWSER_USE.md §10.5).
 LIVE = (
     "Drives the USER'S LIVE BROWSER — the real open tab via the Hermes "
-    "Minimal extension (actual profile, cookies, logins). NOT headless. "
+    "extension (actual profile, cookies, logins). NOT headless. "
     "Prefer this whenever the user refers to their own open browser, tabs, "
     "or a logged-in site (portals, school/university apps, email). "
     "YOU attach tabs yourself with browser_attach / browser_tabs — NEVER "
@@ -770,7 +770,7 @@ def _tab(auto_attach=True):
     if tab is None:
         if not bridge.is_connected():
             raise ToolError(
-                'BRIDGE_DOWN: bridge not connected — load the Hermes Minimal '
+                'BRIDGE_DOWN: bridge not connected — load the Hermes '
                 'extension (and keep Hermes running with live_browser MCP)')
         ok, result = bridge.request('status', {}, STATUS_TIMEOUT)
         if not ok:
@@ -1098,7 +1098,7 @@ def browser_attach(tabId: int = 0, url: str = '', title: str = '') -> dict:
     Returns {attached, tab}.""" % LIVE
     if not bridge.is_connected():
         raise ToolError(
-            'BRIDGE_DOWN: extension not connected — load the Hermes Minimal '
+            'BRIDGE_DOWN: extension not connected — load the Hermes '
             'extension and keep Chrome/Edge open')
     result = _tabs_action('attach', tabId=tabId, url=url, title=title)
     if not (isinstance(result, dict) and result.get('attached')):

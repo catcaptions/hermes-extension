@@ -1,10 +1,10 @@
 <div align="center">
 
-<img src="icons/icon-128.png" width="80" alt="Hermes Minimal logo">
+<img src="icons/icon-128.png" width="80" alt="Hermes Extension logo">
 
-# Hermes Minimal
+# Hermes Extension
 
-**A bare-minimum ChatGPT-style side panel for your local [Hermes Agent](https://github.com/NousResearch/hermes-agent) gateway.**
+**A ChatGPT-style side panel for your local [Hermes Agent](https://github.com/NousResearch/hermes-agent) gateway.**
 
 No build step · No frameworks · No content scripts
 
@@ -20,15 +20,15 @@ No build step · No frameworks · No content scripts
 
 A tiny Chrome/Edge extension that puts a ChatGPT-clean chat panel in your browser's side panel and talks to a **local Hermes Agent gateway** over plain HTTP + SSE.
 
-The whole extension is **vanilla HTML/CSS/JS with no build step** — the client is `sidepanel.js` plus a small, node-testable `renderer.js`. It was intentionally kept minimal so it's easy to read, audit, and maintain (even for weaker coding models 😉).
+The whole extension is **vanilla HTML/CSS/JS with no build step** — the client is `sidepanel.js` plus a small, node-testable `renderer.js`. It was intentionally kept lean so it's easy to read, audit, and maintain (even for weaker coding models 😉).
 
 ## See it in action
 
-<img src="docs/screen-recording.gif" width="300" alt="Hermes Minimal in action">
+<img src="docs/screen-recording.gif" width="300" alt="Hermes Extension in action">
 
 ## Architecture
 
-![How Hermes Minimal fits together](docs/architecture.svg)
+![How Hermes Extension fits together](docs/architecture.svg)
 
 The panel is a pure HTTP client of the local **Hermes Gateway** (`127.0.0.1:8642`). For media it talks to the local **media bridge** (`8643`), and for browser use it drives the **browser-use hub** (`8644`).
 
@@ -96,7 +96,7 @@ Plus `GET /v1/health` for the connection test.
 2. Open `chrome://extensions` (or `edge://extensions`)
 3. Enable **Developer mode**
 4. **Load unpacked** → select this folder
-5. Pin **Hermes Minimal**, click the icon (or `Alt+H`)
+5. Pin **Hermes Extension**, click the icon (or `Alt+H`)
 6. **Local media**: Edge cannot load `file://` subresources from extension pages — even with "Allow access to file URLs" on (Chrome tolerates it, Edge does not). The reliable path is the **media bridge** in step 7; the toggle is no longer required for images.
 7. **Media bridge (recommended, zero browser config):** double-click `media-bridge.bat` (keep the console window open; Python 3 required) — the panel probes `http://127.0.0.1:8643` at boot and serves local media through it directly. See "Media bridge" below.
 8. Get your API key — on Windows, double-click `Copy_API_Key.cmd` → paste into Settings → **Test connection** → **Save**
@@ -237,7 +237,8 @@ py -3.14 -m pip install --user fastmcp websockets
   mcp_servers:
     live_browser:
       command: "py"
-      args: ["-3.14", "-u", "C:\\projects\\browser-extensions\\hermes-minimal-extension\\browser-mcp.py"]
+      args: ["-3.14", "-u", "C:\\projects\\browser-extensions\\hermes-extension\\browser-mcp.py"]
+      # Replace with your actual checkout path if you cloned elsewhere.
       env:
         PYTHONPATH: ""
       timeout: 120
@@ -283,7 +284,8 @@ afterwards (same rule as `media-bridge.py`).
 |---------|-----|
 | "Invalid gateway API key" | Copy `API_SERVER_KEY` from `~/.hermes/.env`, not a random key |
 | Connection refused | `hermes gateway start` (or restart the scheduled task) |
-| Health OK but sessions 401 | Key mismatch between `.env` and running process — restart gateway after changing key |
+| Health OK but sessions 401/403 | Key mismatch between `.env` and running process — restart gateway after changing key |
+| Create session failed (403) | Folder rename: unpacked extension ID changed → `chrome.storage.local` wiped → API key missing. Re-run `Copy_API_Key.cmd`, paste in Settings → Test connection → Save. If Health OK but still 403, `hermes gateway restart`. |
 | Empty replies | Check Hermes logs; model backend may be down |
 | Local images render as path links | Run `media-bridge.bat` (or `python media-bridge.py`) and reload the panel — Edge can't load `file://` from extension pages |
 | Chip stuck red / tools return `TIMEOUT` even though the hub should be up | A shadow listener can hold the port while `browser-mcp.py` is down (e.g. the Hermes gateway binds `0.0.0.0:8644`; the extension then "connects" to the wrong peer). The extension now treats a connection as usable only after the hub's `hello-ack` — a missing ack means close + backoff, so the bridge recovers when the real hub returns. Verify with `netstat -ano \| findstr :8644` and restart `browser-mcp.bat` |

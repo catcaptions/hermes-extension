@@ -1,4 +1,4 @@
-# Hermes Minimal
+# Hermes Extension
 
 Vanilla MV3 side-panel for a local Hermes gateway. No build step. README.md
 is the documentation — read it before changing anything.

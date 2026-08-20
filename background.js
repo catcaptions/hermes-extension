@@ -1,4 +1,4 @@
-// Hermes Minimal — MV3 service worker.
+// Hermes Extension — MV3 service worker.
 // 1) sidePanel behavior (toolbar click opens the panel).
 // 2) Browser-use layer B1 (TASK_BRIEF_B1): WebSocket client for the local
 //    browser-mcp.py hub (ws://127.0.0.1:8644) + chrome.debugger relay.
@@ -18,7 +18,7 @@ const ACK_TIMEOUT_MS = 5000;
 const KEEPALIVE_PERIOD_MIN = 0.5;
 
 // Demand-only debugger: every chrome.debugger.attach re-shows Chrome's
-// "Hermes Minimal started debugging this browser" banner, so the debugger
+// "Hermes Extension started debugging this browser" banner, so the debugger
 // is attached ONLY while the hub is actually driving the browser. When no
 // agent command (cdp/tabs/status) arrives for this long, release the
 // debugger — the banner disappears until the next tool call re-attaches.

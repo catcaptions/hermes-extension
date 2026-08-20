@@ -4,7 +4,7 @@ set "ENVFILE=%USERPROFILE%\.hermes\.env"
 
 if not exist "%ENVFILE%" (
   echo Could not find %ENVFILE%
-  echo Hermes Minimal needs API_SERVER_KEY from your Hermes .env file.
+  echo Hermes Extension needs API_SERVER_KEY from your Hermes .env file.
   pause
   exit /b 1
 )
@@ -21,5 +21,5 @@ if not defined KEY (
 
 <nul set /p "=!KEY!" | clip
 echo API key copied to clipboard.
-echo Paste it into Hermes Minimal settings, then click Test connection.
+echo Paste it into Hermes Extension settings, then click Test connection.
 pause

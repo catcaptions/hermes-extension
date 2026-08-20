@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hermes Minimal media bridge — serves local media files to the extension so
+Hermes Extension media bridge — serves local media files to the extension so
 images/audio/video show up without the browser's "Allow access to file
 URLs" toggle (the gateway itself serves no media over HTTP).
 
@@ -48,7 +48,7 @@ MAX_SAVE_BYTES = 5 * 1024 * 1024
 # /fetch (TASK_BRIEF_10): plain urllib fetch with a curl-ish UA. The URL is
 # SSRF-guarded: http(s) only, no loopback hosts (string + DNS-resolved),
 # and never the gateway ports (8642/8643/8644).
-FETCH_UA = 'HermesMinimal/1.0 (media-bridge)'
+FETCH_UA = 'HermesExtension/1.0 (media-bridge)'
 FETCH_TIMEOUT = 60
 MAX_FETCH_BYTES = 1024 * 1024
 BLOCKED_HOSTS = ('localhost', '0.0.0.0', '::1')

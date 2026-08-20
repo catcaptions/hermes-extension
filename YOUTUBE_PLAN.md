@@ -40,7 +40,7 @@ context, lose your train of thought. And every message? It leaves your
 computer. For a dev, that's a bad habit.
 
 [0:35 THE BUILD]
-I called it Hermes Minimal. The whole thing is vanilla HTML, CSS, JS —
+I called it Hermes Extension. The whole thing is vanilla HTML, CSS, JS —
 no React, no build step, no frameworks. It talks to a local gateway over
 plain HTTP and server-sent events. You load it unpacked, paste your
 gateway URL and API key, and you've got a ChatGPT-clean panel on the
@@ -79,7 +79,7 @@ frameworks.
 [END — ~3:15]
 
 ### Description (SEO)
-In this video I show Hermes Minimal — a zero-build Chrome/Edge side-panel
+In this video I show Hermes Extension — a zero-build Chrome/Edge side-panel
 extension that gives you a private, local-first ChatGPT-style chat in
 your browser. It streams replies from your own Hermes Agent gateway over
 HTTP + SSE, renders Markdown and LaTeX, bridges local media
@@ -89,7 +89,7 @@ logged-in tabs via a local browser bridge.
 No cloud. No frameworks. No token meter. Open source (MIT).
 
 Links:
-- Hermes Minimal repo: [URL]
+- Hermes Extension repo: [URL]
 - Hermes Agent: [URL]
 - My config / setup: [URL]
 
@@ -120,7 +120,7 @@ the 4 gateway endpoints.
 
 ### Description (SEO)
 Most Chrome extension tutorials start with Vite, a framework, and a
-dependency tree. I did the opposite — Hermes Minimal is vanilla
+dependency tree. I did the opposite — Hermes Extension is vanilla
 HTML/CSS/JS, no build step, and it's easier to read because of it. In
 this video I walk through the architecture: the MV3 manifest, the
 side-panel client, how Server-Sent Events stream tokens, and how I kept
@@ -142,7 +142,7 @@ lifecycle, the local MCP hub.
 ### Description (SEO)
 Your AI shouldn't need a separate RPA subscription to use the web you're
 already logged into. In this video I show the live-browser bridge in
-Hermes Minimal: a local MCP hub + the extension's debugger relay let my
+Hermes Extension: a local MCP hub + the extension's debugger relay let my
 local agent observe and act on my real tabs — click, type, fill,
 navigate — using my actual cookies and logins. Loopback only, no cloud.
 I cover the setup, the pairing, and what you can (and can't) do safely.
