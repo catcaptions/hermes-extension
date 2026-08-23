@@ -553,6 +553,9 @@ code {
 .msg {
   padding: 12px 18px;
   max-width: 100%;
+  /* ponytail: skip layout for off-screen messages — 80% of virtual-list win in one line */
+  content-visibility: auto;
+  contain-intrinsic-size: 0 500px;
 }
 .msg + .msg { margin-top: 2px; }
 

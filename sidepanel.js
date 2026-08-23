@@ -145,7 +145,7 @@ async function loadSettings() {
   }
   settings = { ...DEFAULTS, ...(stored[STORAGE_KEY] || {}) };
   if (!stored[STORAGE_KEY] && !stored[LEGACY_STORAGE_KEY] && !settings.apiKey) {
-    console.info('Hermes Extension: no stored settings — repaste API key if this follows a folder rename (new extension ID wipes storage)');
+    console.info('Hermes Extension: no stored settings — folder rename changes unpacked extension ID and wipes chrome.storage.local. Re-copy API_SERVER_KEY from %LOCALAPPDATA%\\hermes\\.env (Win) or ~/.hermes/.env and re-add your extension ID to API_SERVER_CORS_ORIGINS then hermes gateway restart.');
   }
   activeSessionId = settings.sessionId || '';
   els.cfgUrl.value = settings.gatewayUrl || DEFAULTS.gatewayUrl;
@@ -250,10 +250,12 @@ async function createSession(title) {
   if (!res.ok) {
     const base = errorMessage(payload, `Create session failed (${res.status})`);
     const hint = res.status === 403 && !settings.apiKey
-      ? ' — API key missing (folder rename wipes unpacked storage). Re-copy API_SERVER_KEY from ~/.hermes/.env → Settings → Test connection → Save.'
+      ? ' — API key missing (folder rename wipes unpacked storage). Re-copy API_SERVER_KEY from %LOCALAPPDATA%\\hermes\\.env (or ~/.hermes/.env) → Settings → Test connection → Save. If still 403, add this extension ID (chrome://extensions) to API_SERVER_CORS_ORIGINS then hermes gateway restart.'
       : res.status === 403
-        ? ' — gateway rejected the API key. Re-copy API_SERVER_KEY from ~/.hermes/.env → Test connection → Save; if Health OK but still 403, run hermes gateway restart.'
-        : '';
+        ? ' — gateway rejected Origin (CORS). Add chrome-extension://' + chrome.runtime.id + ' to API_SERVER_CORS_ORIGINS in %LOCALAPPDATA%\\hermes\\.env then hermes gateway restart. If 401, re-copy API_SERVER_KEY instead.'
+        : res.status === 401
+          ? ' — invalid API key. Re-copy API_SERVER_KEY from %LOCALAPPDATA%\\hermes\\.env (or ~/.hermes/.env) → Test connection → Save; if Health OK but still 401, run hermes gateway restart.'
+          : '';
     throw new Error(`${base}${hint}`);
   }
   const session = payload.session || payload;
@@ -407,9 +409,11 @@ async function testConnection() {
   const payload2 = await readJson(res2);
   if (!res2.ok) {
     const base = errorMessage(payload2, `Auth failed (${res2.status})`);
-    const hint = res2.status === 401 || res2.status === 403
-      ? ' — re-copy API_SERVER_KEY from ~/.hermes/.env → Test connection → Save; if Health OK but still 401/403, run hermes gateway restart.'
-      : '';
+    const hint = res2.status === 403
+      ? ' — CORS Origin rejected. Add chrome-extension://' + chrome.runtime.id + ' to API_SERVER_CORS_ORIGINS in %LOCALAPPDATA%\\hermes\\.env then hermes gateway restart.'
+      : res2.status === 401
+        ? ' — invalid API key. Re-copy API_SERVER_KEY from %LOCALAPPDATA%\\hermes\\.env (or ~/.hermes/.env) → Test connection → Save; if Health OK but still 401, run hermes gateway restart.'
+        : '';
     throw new Error(`${base}${hint}`);
   }
   return payload;
@@ -827,22 +831,34 @@ function loadImageEl(dataUrl) {
   });
 }
 
-// Downscale to ≤MAX_IMAGE_SIDE and ≤MAX_DATA_URL_BYTES (PNG first; JPEG
-// fallback loop for photos/large captures). Never throws — callers fall
-// back to the original data URL on any canvas failure.
+// Downscale to ≤MAX_IMAGE_SIDE and ≤MAX_DATA_URL_BYTES. JPEG photos take the
+// fast path (PNG first for transparency-capable images). Never throws.
 async function downscaleImage(dataUrl) {
   const img = await loadImageEl(dataUrl);
   const scale = Math.min(1, MAX_IMAGE_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
   let w = Math.max(1, Math.round(img.naturalWidth * scale));
   let h = Math.max(1, Math.round(img.naturalHeight * scale));
+  // ponytail: reuse one canvas, JPEG fast path for photos (one encode vs two)
+  const c = document.createElement('canvas');
   const draw = (tw, th, mime, q) => {
-    const c = document.createElement('canvas');
     c.width = tw;
     c.height = th;
     c.getContext('2d').drawImage(img, 0, 0, tw, th);
     return c.toDataURL(mime, q);
   };
+  const mimeHint = /^data:(image\/\w+);/i.exec(dataUrl)?.[1] || '';
+  const isJpeg = mimeHint.toLowerCase() === 'image/jpeg';
   try {
+    if (isJpeg) {
+      let out = draw(w, h, 'image/jpeg', 0.82);
+      let guard = 0;
+      while (out.length > MAX_DATA_URL_BYTES && w > 64 && guard++ < 6) {
+        w = Math.max(1, Math.round(w * 0.7));
+        h = Math.max(1, Math.round(h * 0.7));
+        out = draw(w, h, 'image/jpeg', 0.82);
+      }
+      return out;
+    }
     let out = draw(w, h, 'image/png');
     if (out.length > MAX_DATA_URL_BYTES) {
       out = draw(w, h, 'image/jpeg', 0.82);
@@ -961,18 +977,30 @@ function basename(path) {
   return String(path).split(/[\\/]/).pop() || path;
 }
 
+// ponytail: memoize KaTeX — same formula often repeats while streaming
+const mathCache = new Map(); // key: tex\0display -> html, LRU cap 500
 function mathHtml(item) {
   if (!item) return '';
+  const key = `${item.tex}\0${item.display ? '1' : '0'}`;
+  const cached = mathCache.get(key);
+  if (cached !== undefined) return cached;
+  let out;
   try {
-    return katex.renderToString(item.tex, {
+    out = katex.renderToString(item.tex, {
       throwOnError: false,
       displayMode: Boolean(item.display),
       output: 'html',
     });
   } catch {
     // KaTeX never throws with throwOnError:false, but never break a message.
-    return escapeHtml(item.tex);
+    out = escapeHtml(item.tex);
   }
+  mathCache.set(key, out);
+  if (mathCache.size > 500) {
+    const first = mathCache.keys().next().value;
+    mathCache.delete(first);
+  }
+  return out;
 }
 
 // Bridge URL for local absolute paths (bridge serves them without the
@@ -1031,10 +1059,20 @@ function fallbackBlockHtml(raw) {
   return `<a class="hm-img-fallback" href="${href}" title="${escapeHtml(raw)}">${escapeHtml(raw)}</a><span class="hm-hint">${escapeHtml(BRIDGE_HINT)}</span>`;
 }
 
+// ponytail: memoize rendered markdown — same text+failed/bridged often repeats (poll + streaming)
+const renderCache = new Map(); // key: text\0failedKey\0bridgedKey -> html, LRU cap 100
+function renderCacheKey(text, failed, bridged) {
+  const fk = failed.size ? [...failed].sort((a, b) => a - b).join(',') : '';
+  const bk = bridged.size ? [...bridged].sort((a, b) => a - b).join(',') : '';
+  return `${text}\0${fk}\0${bk}`;
+}
 function renderMarkdown(text, ctx, tokens) {
-  const { scrubbed, math, media, url, nonce } = tokens || renderer.extractTokens(text || '');
   const failed = ctx?.failed || new Set();
   const bridged = ctx?.bridged || new Set();
+  const key = renderCacheKey(String(text || ''), failed, bridged);
+  const hit = renderCache.get(key);
+  if (hit !== undefined) return hit;
+  const { scrubbed, math, media, url, nonce } = tokens || renderer.extractTokens(text || '');
   let html;
   try {
     html = marked.parse(scrubbed, { gfm: true, breaks: true });
@@ -1061,6 +1099,11 @@ function renderMarkdown(text, ctx, tokens) {
     const u = url[Number(i)];
     return u ? `<a class="hm-url" href="${escapeHtml(u)}" target="_blank" rel="noopener">${escapeHtml(u)}</a>` : '';
   });
+  renderCache.set(key, html);
+  if (renderCache.size > 100) {
+    const first = renderCache.keys().next().value;
+    renderCache.delete(first);
+  }
   return html;
 }
 
@@ -1258,20 +1301,61 @@ function renderMessageBody(msg) {
     body.innerHTML = '';
   } else {
     body.style.display = '';
-    const tokens = renderer.extractTokens(msg.content || '');
-    msg._media = tokens.media;
-    body.innerHTML = renderMarkdown(msg.content, { failed, bridged }, tokens);
-    attachMediaFallbacks(body, msg);
+    // ponytail: per-message memo — skip extractTokens+renderMarkdown when content unchanged
+    const fk = failed.size ? [...failed].sort((a, b) => a - b).join(',') : '';
+    const bk = bridged.size ? [...bridged].sort((a, b) => a - b).join(',') : '';
+    const cacheKey = `${msg.content || ''}\0${fk}\0${bk}`;
+    if (msg._renderKey === cacheKey && msg._renderHtml !== undefined) {
+      body.innerHTML = msg._renderHtml;
+      // tokens.media still needed for fallback error chain
+      if (!msg._media) msg._media = renderer.extractTokens(msg.content || '').media;
+      attachMediaFallbacks(body, msg);
+    } else {
+      const tokens = renderer.extractTokens(msg.content || '');
+      msg._media = tokens.media;
+      const html = renderMarkdown(msg.content, { failed, bridged }, tokens);
+      msg._renderKey = cacheKey;
+      msg._renderHtml = html;
+      body.innerHTML = html;
+      attachMediaFallbacks(body, msg);
+    }
   }
   renderActivityBlocks(msg);
 }
 
+let streamRaf = null;
+let lastStreamRender = 0;
 function scheduleStreamingRender(msg) {
-  clearTimeout(streamTimer);
-  streamTimer = setTimeout(() => {
+  // ponytail: coalesce streaming re-renders to the browser's paint (rAF) + 60 ms throttle
+  if (streamRaf != null) return; // already queued — next frame will pick up latest content
+  const doRender = () => {
+    streamRaf = null;
+    const now = Date.now();
+    const since = now - lastStreamRender;
+    if (since < STREAM_RENDER_MS) {
+      // Throttle: too soon since last paint — delay remainder then render
+      streamTimer = setTimeout(() => {
+        lastStreamRender = Date.now();
+        renderMessageBody(msg);
+        scrollToBottomIfNear();
+      }, STREAM_RENDER_MS - since);
+      return;
+    }
+    lastStreamRender = now;
     renderMessageBody(msg);
-    scrollToBottomIfNear(); // keep the caret in view while the reply grows
-  }, STREAM_RENDER_MS);
+    scrollToBottomIfNear();
+  };
+  clearTimeout(streamTimer);
+  if (typeof requestAnimationFrame === 'function') {
+    streamRaf = requestAnimationFrame(doRender);
+  } else {
+    streamTimer = setTimeout(doRender, STREAM_RENDER_MS);
+  }
+}
+function cancelStreamingRender() {
+  if (streamRaf != null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(streamRaf);
+  streamRaf = null;
+  clearTimeout(streamTimer);
 }
 
 function scrollToBottomIfNear(threshold = 60) {
@@ -1281,21 +1365,37 @@ function scrollToBottomIfNear(threshold = 60) {
 }
 
 function renderMessages() {
-  // Keep empty state node; rebuild the rest.
-  const kids = [...els.messages.children].filter((n) => n !== els.emptyState);
-  for (const n of kids) n.remove();
-
   const has = messages.length > 0;
   els.emptyState.classList.toggle('hidden', has);
 
-  for (const msg of messages) {
-    const div = document.createElement('div');
-    div.className = `msg ${msg.role}${msg.streaming ? ' streaming' : ''}${msg.error ? ' error' : ''}`;
+  // ponytail: incremental diff — reuse existing DOM nodes instead of tearing all down
+  // Keeps _failedImgs/_bridged/_renderKey/_activity on reused nodes; only appends/removes delta
+  const kids = [...els.messages.children].filter((n) => n !== els.emptyState);
+  // Remove excess nodes if messages shrank (e.g. poll adopted shorter history)
+  while (kids.length > messages.length) {
+    const extra = kids.pop();
+    extra.remove();
+  }
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    let div = kids[i];
+    const cls = `msg ${msg.role}${msg.streaming ? ' streaming' : ''}${msg.error ? ' error' : ''}`;
     const roleLabel = msg.error ? 'Error' : msg.role === 'user' ? 'You' : 'Hermes';
-    div.innerHTML = `<div class="msg-role">${escapeHtml(roleLabel)}</div><div class="hm-activity" style="display:none"></div><div class="msg-body"></div>`;
-    msg._el = div;
-    els.messages.appendChild(div);
-    renderMessageBody(msg);
+    if (div) {
+      // Reuse existing node — update class/role if changed, rebind msg._el
+      if (div.className !== cls) div.className = cls;
+      const roleEl = div.querySelector('.msg-role');
+      if (roleEl && roleEl.textContent !== roleLabel) roleEl.textContent = roleLabel;
+      msg._el = div;
+      renderMessageBody(msg);
+    } else {
+      div = document.createElement('div');
+      div.className = cls;
+      div.innerHTML = `<div class="msg-role">${escapeHtml(roleLabel)}</div><div class="hm-activity" style="display:none"></div><div class="msg-body"></div>`;
+      msg._el = div;
+      els.messages.appendChild(div);
+      renderMessageBody(msg);
+    }
   }
   scrollToBottomIfNear();
 }
@@ -2417,11 +2517,19 @@ async function pollActiveSession() {
   }
 }
 
+function shouldPoll() {
+  return document.visibilityState === 'visible'
+    && !sending
+    && !sessionMissing
+    && Boolean(settings.apiKey && activeSessionId)
+    && els.settingsPanel.classList.contains('hidden');
+}
 function startPolling() {
   if (pollTimer) return;
-  pollTimer = setInterval(pollActiveSession, POLL_INTERVAL_MS);
+  const tick = () => { if (shouldPoll()) pollActiveSession(); };
+  pollTimer = setInterval(tick, POLL_INTERVAL_MS);
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') pollActiveSession();
+    if (document.visibilityState === 'visible' && shouldPoll()) pollActiveSession();
   });
 }
 
@@ -2462,7 +2570,7 @@ async function beginNewChat() {
   // Abort any in-flight stream so starting fresh never blocks (TASK_BRIEF_5).
   if (sending) {
     abortController?.abort();
-    clearTimeout(streamTimer);
+    cancelStreamingRender();
     setSending(false);
   }
   closeSessionMenu();
@@ -2505,7 +2613,7 @@ async function selectSession(id, title) {
   // The gateway run continues server-side and shows up via the poll.
   if (sending) {
     abortController?.abort();
-    clearTimeout(streamTimer);
+    cancelStreamingRender();
     setSending(false);
   }
   closeSessionMenu();
@@ -2813,7 +2921,7 @@ async function sendMessage(text) {
       },
     });
 
-    clearTimeout(streamTimer);
+    cancelStreamingRender();
     assistantMsg.content = finalText || assistantMsg.content || '';
     const act = assistantMsg._activity;
     const hasAct = Boolean(act && (String(act.thought || '').trim() || (act.tools && act.tools.length) || (act.diffs && act.diffs.length) || (act.skills && act.skills.length) || (act.unknown && act.unknown.length)));
@@ -2848,7 +2956,7 @@ async function sendMessage(text) {
       }
       setConnection('offline', 'Error');
     }
-    clearTimeout(streamTimer);
+    cancelStreamingRender();
     syncPollState();
     renderMessages();
   } finally {
@@ -3372,6 +3480,8 @@ async function browserQueryState() {
 }
 
 function loadBrowserTabs() {
+  // ponytail: no need to query tabs when Browser panel is hidden — render will early-return anyway
+  if (els.browserPanel.classList.contains('hidden')) return;
   clearTimeout(browserTabTimer);
   browserTabTimer = setTimeout(async () => {
     try {
@@ -3465,18 +3575,40 @@ function initBrowserUI() {
     chrome.tabs[ev].addListener?.(loadBrowserTabs);
   }
   chrome.tabs.onUpdated?.addListener((_id, info) => {
-    if (info.title !== undefined || info.url !== undefined) loadBrowserTabs();
+    // ponytail: ignore noise (audible/favIcon) — only title/url/status matter
+    if (info.title !== undefined || info.url !== undefined || info.status !== undefined) loadBrowserTabs();
   });
   // State round-trip while the panel is open (driving/idle transitions and
   // fresh lastAction timestamps), plus a local 1 s tick so the idle-release
   // countdown and the driving pulse decay without any messages.
-  browserPollTimer = setInterval(() => {
-    if (!els.browserPanel.classList.contains('hidden')) browserQueryState();
-  }, BROWSER_POLL_MS);
-  setInterval(() => {
-    renderBrowserChip();
-    if (!els.browserPanel.classList.contains('hidden')) renderBrowserStatus();
-  }, BROWSER_TICK_MS);
+  // ponytail: pause Browser timers when panel closed — no wakeups for invisible UI
+  let browserTickTimer = null;
+  const startBrowserTimers = () => {
+    if (browserPollTimer) return;
+    browserPollTimer = setInterval(() => {
+      if (!els.browserPanel.classList.contains('hidden')) browserQueryState();
+    }, BROWSER_POLL_MS);
+    browserTickTimer = setInterval(() => {
+      renderBrowserChip();
+      if (!els.browserPanel.classList.contains('hidden')) renderBrowserStatus();
+    }, BROWSER_TICK_MS);
+  };
+  const stopBrowserTimers = () => {
+    clearInterval(browserPollTimer); browserPollTimer = null;
+    clearInterval(browserTickTimer); browserTickTimer = null;
+  };
+  // Observe Browser panel open/close and start/stop timers accordingly
+  const browserPanelObserver = new MutationObserver(() => {
+    if (els.browserPanel.classList.contains('hidden')) stopBrowserTimers();
+    else { startBrowserTimers(); browserQueryState(); }
+  });
+  browserPanelObserver.observe(els.browserPanel, { attributes: true, attributeFilter: ['class'] });
+  // Start timers only if panel is already open (usually hidden at boot)
+  if (!els.browserPanel.classList.contains('hidden')) startBrowserTimers();
+  else {
+    // Keep chip tick even when panel hidden — cheap local render only
+    browserTickTimer = setInterval(() => { renderBrowserChip(); }, BROWSER_TICK_MS);
+  }
   browserQueryState();
   loadBrowserTabs();
 }
@@ -3500,7 +3632,7 @@ async function boot() {
   if (!settings.apiKey) {
     setConnection('offline', 'Add API key in settings');
     openSettings(true);
-    els.settingsStatus.textContent = 'Paste API_SERVER_KEY from ~/.hermes/.env to get started.';
+    els.settingsStatus.textContent = 'Paste API_SERVER_KEY from %LOCALAPPDATA%\\hermes\\.env (Win) or ~/.hermes/.env → Test connection → Save. If 403, also check API_SERVER_CORS_ORIGINS.';
     els.settingsStatus.className = 'status';
     return;
   }
