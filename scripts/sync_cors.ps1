@@ -45,15 +45,15 @@ foreach ($envFile in $envFiles) {
     $content = Get-Content $envFile -Raw
     if ($content -match "API_SERVER_CORS_ORIGINS=") {
       if ($content -notmatch [regex]::Escape($ExtensionId)) {
-        $newContent = $content -replace "API_SERVER_CORS_ORIGINS=.*", {
-          $m = $_.Value
-          if ($m.Trim().EndsWith("=")) { return "API_SERVER_CORS_ORIGINS=$ExtensionId" }
-          return "$m,$ExtensionId"
+        # PowerShell 5.1 compat: -replace with scriptblock is PS6+ only
+        $matched = $content -match "API_SERVER_CORS_ORIGINS=(.*)"
+        $existing = if ($matched) { $Matches[1] } else { "" }
+        if ([string]::IsNullOrWhiteSpace($existing)) {
+          $newLine = "API_SERVER_CORS_ORIGINS=$ExtensionId"
+        } else {
+          $newLine = "API_SERVER_CORS_ORIGINS=$($existing.Trim()),$ExtensionId"
         }
-        # Fallback simple append if regex replace didn't append
-        if ($newContent -notmatch [regex]::Escape($ExtensionId)) {
-          $newContent = $content -replace "API_SERVER_CORS_ORIGINS=(.*)", "API_SERVER_CORS_ORIGINS=`$1,$ExtensionId"
-        }
+        $newContent = $content -replace "API_SERVER_CORS_ORIGINS=.*", $newLine
         Set-Content -Path $envFile -Value $newContent.Trim() -NoNewline
         Write-Host "Updated $envFile" -ForegroundColor Green
         Get-Content $envFile | Select-String "API_SERVER_CORS_ORIGINS"
