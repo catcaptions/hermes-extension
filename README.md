@@ -282,12 +282,15 @@ afterwards (same rule as `media-bridge.py`).
 
 | Symptom | Fix |
 |---------|-----|
-| "Invalid gateway API key" | Copy `API_SERVER_KEY` from `~/.hermes/.env`, not a random key |
+| "Invalid gateway API key" (401) | Copy `API_SERVER_KEY` from `%LOCALAPPDATA%\hermes\.env` (Windows) or `~/.hermes/.env` — not a random key. `Copy_API_Key.cmd` now checks both locations. |
 | Connection refused | `hermes gateway start` (or restart the scheduled task) |
-| Health OK but sessions 401/403 | Key mismatch between `.env` and running process — restart gateway after changing key |
-| Create session failed (403) | Folder rename: unpacked extension ID changed → `chrome.storage.local` wiped → API key missing. Re-run `Copy_API_Key.cmd`, paste in Settings → Test connection → Save. If Health OK but still 403, `hermes gateway restart`. |
+| Health OK but sessions 401 | Key mismatch between `.env` and running gateway process — `hermes gateway restart` after changing `.env` |
+| Health OK but sessions 403 | CORS Origin rejected. Extension `Origin: chrome-extension://<id>` not in `API_SERVER_CORS_ORIGINS`. Run `powershell -ExecutionPolicy Bypass -File scripts/sync_cors.ps1` (pinned ID `efhcbfjhccbdcglgdhgbnikcnffcmhpb` from `manifest.json:key`) then `hermes gateway restart`. Verify with `curl -H "Origin: chrome-extension://<id>" -H "Authorization: Bearer KEY" http://127.0.0.1:8642/api/sessions?limit=1` |
+| Create session failed (403) | Two causes: (1) Folder rename without `manifest.json:key` → unpacked ID changed → `chrome.storage.local` wiped → API key missing. Now pinned to `efhcbfjhccbdcglgdhgbnikcnffcmhpb`. Re-run `Copy_API_Key.cmd`, paste in Settings → Test connection → Save. (2) CORS 403 as above — `scripts/sync_cors.ps1` then `hermes gateway restart`. |
+| Create session failed (401) | Invalid key — re-copy from correct env file |
 | Empty replies | Check Hermes logs; model backend may be down |
-| Local images render as path links | Run `media-bridge.bat` (or `python media-bridge.py`) and reload the panel — Edge can't load `file://` from extension pages |
+| Local images render as path links — `local file — start media-bridge.bat…` (e.g. `%APPDATA%\Hermes\composer-images\...png`) | Bridge not running. `media-bridge.py` is required for local files (`%APPDATA%\Hermes`, `~`, `/tmp`, `C:\projects` only). Run `media-bridge.bat` and keep window open, then reload panel. Verify: `curl http://127.0.0.1:8643/media?path=C:\Users\...\image.png` should return 200. `file://` fallback is blocked in MV3 (Edge always, Chrome without toggle). |
+| Local image 403 `path outside allowed roots` | File outside allowlist roots — move under `%APPDATA%\Hermes` or home dir |
 | Chip stuck red / tools return `TIMEOUT` even though the hub should be up | A shadow listener can hold the port while `browser-mcp.py` is down (e.g. the Hermes gateway binds `0.0.0.0:8644`; the extension then "connects" to the wrong peer). The extension now treats a connection as usable only after the hub's `hello-ack` — a missing ack means close + backoff, so the bridge recovers when the real hub returns. Verify with `netstat -ano \| findstr :8644` and restart `browser-mcp.bat` |
 | Extension stuck in a 4401 pairing loop (lockout) | Sidepanel → Browser → **Reset pairing** — wipes the stored token and re-pins this browser's slot with a fresh one (`rotate:true` hello) |
 

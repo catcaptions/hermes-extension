@@ -145,7 +145,7 @@ async function loadSettings() {
   }
   settings = { ...DEFAULTS, ...(stored[STORAGE_KEY] || {}) };
   if (!stored[STORAGE_KEY] && !stored[LEGACY_STORAGE_KEY] && !settings.apiKey) {
-    console.info('Hermes Extension: no stored settings — repaste API key if this follows a folder rename (new extension ID wipes storage)');
+    console.info('Hermes Extension: no stored settings — folder rename changes unpacked extension ID and wipes chrome.storage.local. Re-copy API_SERVER_KEY from %LOCALAPPDATA%\\hermes\\.env (Win) or ~/.hermes/.env and re-add your extension ID to API_SERVER_CORS_ORIGINS then hermes gateway restart.');
   }
   activeSessionId = settings.sessionId || '';
   els.cfgUrl.value = settings.gatewayUrl || DEFAULTS.gatewayUrl;
@@ -250,10 +250,12 @@ async function createSession(title) {
   if (!res.ok) {
     const base = errorMessage(payload, `Create session failed (${res.status})`);
     const hint = res.status === 403 && !settings.apiKey
-      ? ' — API key missing (folder rename wipes unpacked storage). Re-copy API_SERVER_KEY from ~/.hermes/.env → Settings → Test connection → Save.'
+      ? ' — API key missing (folder rename wipes unpacked storage). Re-copy API_SERVER_KEY from %LOCALAPPDATA%\\hermes\\.env (or ~/.hermes/.env) → Settings → Test connection → Save. If still 403, add this extension ID (chrome://extensions) to API_SERVER_CORS_ORIGINS then hermes gateway restart.'
       : res.status === 403
-        ? ' — gateway rejected the API key. Re-copy API_SERVER_KEY from ~/.hermes/.env → Test connection → Save; if Health OK but still 403, run hermes gateway restart.'
-        : '';
+        ? ' — gateway rejected Origin (CORS). Add chrome-extension://' + chrome.runtime.id + ' to API_SERVER_CORS_ORIGINS in %LOCALAPPDATA%\\hermes\\.env then hermes gateway restart. If 401, re-copy API_SERVER_KEY instead.'
+        : res.status === 401
+          ? ' — invalid API key. Re-copy API_SERVER_KEY from %LOCALAPPDATA%\\hermes\\.env (or ~/.hermes/.env) → Test connection → Save; if Health OK but still 401, run hermes gateway restart.'
+          : '';
     throw new Error(`${base}${hint}`);
   }
   const session = payload.session || payload;
@@ -407,9 +409,11 @@ async function testConnection() {
   const payload2 = await readJson(res2);
   if (!res2.ok) {
     const base = errorMessage(payload2, `Auth failed (${res2.status})`);
-    const hint = res2.status === 401 || res2.status === 403
-      ? ' — re-copy API_SERVER_KEY from ~/.hermes/.env → Test connection → Save; if Health OK but still 401/403, run hermes gateway restart.'
-      : '';
+    const hint = res2.status === 403
+      ? ' — CORS Origin rejected. Add chrome-extension://' + chrome.runtime.id + ' to API_SERVER_CORS_ORIGINS in %LOCALAPPDATA%\\hermes\\.env then hermes gateway restart.'
+      : res2.status === 401
+        ? ' — invalid API key. Re-copy API_SERVER_KEY from %LOCALAPPDATA%\\hermes\\.env (or ~/.hermes/.env) → Test connection → Save; if Health OK but still 401, run hermes gateway restart.'
+        : '';
     throw new Error(`${base}${hint}`);
   }
   return payload;
@@ -3628,7 +3632,7 @@ async function boot() {
   if (!settings.apiKey) {
     setConnection('offline', 'Add API key in settings');
     openSettings(true);
-    els.settingsStatus.textContent = 'Paste API_SERVER_KEY from ~/.hermes/.env to get started.';
+    els.settingsStatus.textContent = 'Paste API_SERVER_KEY from %LOCALAPPDATA%\\hermes\\.env (Win) or ~/.hermes/.env → Test connection → Save. If 403, also check API_SERVER_CORS_ORIGINS.';
     els.settingsStatus.className = 'status';
     return;
   }
