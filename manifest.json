@@ -1,6 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Hermes Extension",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtO6WfjS8eruk6ristVkW36HPasbNvnES1JjpQWglEKp3XhCRa64lfslIiPMdeOP9BLDuq4die6kfqCGBZ9qeunqWg1j0o+EVLV4u+VZ0PW4n5kcDoZlgbq0znN+hNlps83706y9VOnkkT2lq8WJit3Or+9nSHUsd6yFUjTidcnnSO4npDJWJ617tTNCniTs2bLPtjwlxp6UXfpkJjPP4j9Urhh/E+XJyrSp8PNrpRtgkgCeQ9rQQa/UuNX5NetnjegSGEvgd5fAxPc15WA3fPTpT7k2kCch/rMKJgMmunHV8s5e5Ial4jhyTw2l+v1Px2A4g2GAbfcp1fbgPGNdYKQIDAQAB",
   "short_name": "Hermes",
   "version": "0.1.1",
   "description": "ChatGPT-style side panel for local Hermes Agent.",
