@@ -570,9 +570,30 @@ code {
 
 .msg-body {
   word-break: break-word;
+  overflow-wrap: anywhere;
   font-size: 14px;
   line-height: 1.55;
   color: var(--text);
+}
+.msg-body .katex, .msg-body .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.msg-body .katex-display {
+  display: block;
+  white-space: normal;
+  margin: 0.6em 0;
+}
+.msg-body .katex-display > .katex {
+  white-space: normal;
+}
+.msg-body .katex-html {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.msg-body .katex-display .katex-html {
+  white-space: normal;
 }
 .msg-body > :first-child { margin-top: 0; }
 .msg-body > :last-child { margin-bottom: 0; }
@@ -703,33 +724,33 @@ code {
   padding: 10px 12px;
 }
 
-.hm-activity { display: flex; flex-direction: column; gap: 4px; margin: 4px 0; }
-.hm-actions { border: none; background: transparent; border-radius: 8px; }
-.hm-actions > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-size: 12px; color: var(--text-muted); border-radius: 6px; user-select: none; }
+.hm-activity { display: flex; flex-direction: column; gap: 4px; margin: 4px 0; min-width: 0; }
+.hm-actions { border: none; background: transparent; border-radius: 8px; min-width: 0; }
+.hm-actions > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-size: 12px; color: var(--text-muted); border-radius: 6px; user-select: none; min-width: 0; overflow-wrap: anywhere; }
 .hm-actions > summary::-webkit-details-marker { display: none; }
-.hm-actions > summary::before { content: "›"; display: inline-block; transition: transform 0.15s; font-size: 13px; line-height: 1; }
+.hm-actions > summary::before { content: "›"; display: inline-block; transition: transform 0.15s; font-size: 13px; line-height: 1; flex-shrink: 0; }
 .hm-actions[open] > summary::before { transform: rotate(90deg); }
-.hm-actions-label { font-weight: 600; color: var(--text-muted); white-space: nowrap; }
+.hm-actions-label { font-weight: 600; color: var(--text-muted); white-space: nowrap; flex-shrink: 0; }
 .hm-actions-preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); font-weight: 400; }
-.hm-actions-chevron { color: var(--text-faint); font-size: 11px; }
+.hm-actions-chevron { color: var(--text-faint); font-size: 11px; flex-shrink: 0; }
 .hm-actions[open] .hm-actions-chevron { transform: rotate(180deg); }
-.hm-actions-body { padding: 4px 0 2px 6px; display: flex; flex-direction: column; gap: 2px; }
-.hm-action-row { display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-size: 12px; color: var(--text-muted); border-radius: 6px; line-height: 1.35; }
-.hm-action-title { font-weight: 500; white-space: nowrap; color: var(--text-muted); }
-.hm-action-sub { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); }
+.hm-actions-body { padding: 4px 0 2px 6px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.hm-action-row { display: flex; align-items: flex-start; gap: 6px; padding: 3px 6px; font-size: 12px; color: var(--text-muted); border-radius: 6px; line-height: 1.35; flex-wrap: wrap; overflow-wrap: anywhere; word-break: break-word; min-width: 0; }
+.hm-action-title { font-weight: 500; white-space: nowrap; color: var(--text-muted); flex-shrink: 0; }
+.hm-action-sub { flex: 1 1 120px; min-width: 0; white-space: normal; overflow-wrap: anywhere; word-break: break-word; color: var(--text-faint); }
 .hm-action-detail { margin-top: 2px; }
 .hm-thought { display: block; padding: 2px 6px; font-size: 12px; color: var(--text-muted); background: transparent; border: none; border-radius: 6px; }
 .hm-thought summary { cursor: pointer; font-weight: 500; font-size: 12px; color: var(--text-muted); list-style: none; display: inline-flex; align-items: center; gap: 4px; }
 .hm-thought summary::-webkit-details-marker { display: none; }
 .hm-tools { display: flex; flex-direction: column; gap: 2px; }
 .hm-tool { display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-size: 12px; color: var(--text-muted); background: transparent; border: none; border-radius: 6px; line-height: 1.35; }
-.hm-tool-head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 400; color: var(--text-muted); flex: 1; min-width: 0; }
+.hm-tool-head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 400; color: var(--text-muted); flex: 1; min-width: 0; flex-wrap: wrap; overflow-wrap: anywhere; }
 .hm-tool-dot { width: 5px; height: 5px; border-radius: 50%; flex: none; background: var(--text-faint); }
 .hm-tool-dot.running { background: #f59e0b; animation: pulse 1.2s ease-in-out infinite; }
 .hm-tool-dot.done { background: var(--ok); opacity: 0.9; }
 .hm-tool-dot.error { background: var(--danger); }
 .hm-tool-title { flex: none; font-weight: 500; color: var(--text-muted); white-space: nowrap; }
-.hm-tool-sub { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text-faint); font-weight: 400; }
+.hm-tool-sub { flex: 1 1 120px; min-width: 0; white-space: normal; overflow-wrap: anywhere; word-break: break-word; font-size: 12px; color: var(--text-faint); font-weight: 400; }
 .hm-diff { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg-soft); }
 .hm-diff-head { padding: 6px 10px; font-size: 11px; font-weight: 600; color: var(--text-muted); border-bottom: 1px solid var(--border); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hm-diff pre { margin: 0; padding: 8px 10px; font-family: var(--mono); font-size: 11.5px; line-height: 1.5; overflow-x: auto; max-height: 220px; white-space: pre-wrap; word-break: break-word; }

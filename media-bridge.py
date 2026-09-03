@@ -47,12 +47,12 @@ MAX_SAVE_BYTES = 5 * 1024 * 1024
 
 # /fetch (TASK_BRIEF_10): plain urllib fetch with a curl-ish UA. The URL is
 # SSRF-guarded: http(s) only, no loopback hosts (string + DNS-resolved),
-# and never the gateway ports (8642/8643/8644).
+# and never the gateway/hub ports (8642/8643/8644/8645).
 FETCH_UA = 'HermesExtension/1.0 (media-bridge)'
 FETCH_TIMEOUT = 60
 MAX_FETCH_BYTES = 1024 * 1024
 BLOCKED_HOSTS = ('localhost', '0.0.0.0', '::1')
-BLOCKED_PORTS = (8642, 8643, 8644)
+BLOCKED_PORTS = (8642, 8643, 8644, 8645)
 
 SAVE_EXT = {
     'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp',

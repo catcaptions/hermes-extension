@@ -35,10 +35,10 @@ These are defaults, not law.
 1. **`__pycache__` in the root.** Never compile-check Python with
    `py_compile` in-repo. Syntax-check with `python -B -c "import ast;
    ast.parse(open('media-bridge.py', encoding='utf-8').read())"`.
-2. **Two hubs on 8644.** Hermes spawns `browser-mcp.py` itself when the MCP
+2. **Two hubs on 8645.** Hermes spawns `browser-mcp.py` itself when the MCP
    registration is active; `browser-mcp.bat` is standalone-only. Never run
-   both. A shadow listener on 8644 → extension waits for the hub's
-   `hello-ack`. Diagnose: `netstat -ano | findstr :8644`.
+   both. A shadow listener on 8645 → extension waits for the hub's
+   `hello-ack`. Diagnose: `netstat -ano | findstr :8645`.
 3. **Hardcoding the API key or gateway URL.** Key is in `~/.hermes/.env`
    (`API_SERVER_KEY`), entered at runtime in Settings.
 4. **Hand-editing `.live-browser-token`.** Recover a 4401 lockout via
@@ -77,7 +77,7 @@ the change is done and verified — don't wait to be asked.
 - `background.js` — service worker: sidePanel, WS client, debugger relay
 - `sidepanel.html/.css/.js` — panel UI and client
 - `renderer.js` — pure markdown/media/math extraction
-- `browser-mcp.py` — browser-use hub (MCP stdio + WS on 8644)
+- `browser-mcp.py` — browser-use hub (MCP stdio + WS on 8645)
 - `media-bridge.py` — local media server on 8643 (stdlib-only)
 - `test_renderer.js`, `test_browser_mcp.py` — the two test files
 - `PROTOCOL.md` — live-browser wire protocol

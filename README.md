@@ -30,7 +30,7 @@ The whole extension is **vanilla HTML/CSS/JS with no build step** — the client
 
 ![How Hermes Extension fits together](docs/architecture.svg)
 
-The panel is a pure HTTP client of the local **Hermes Gateway** (`127.0.0.1:8642`). For media it talks to the local **media bridge** (`8643`), and for browser use it drives the **browser-use hub** (`8644`).
+The panel is a pure HTTP client of the local **Hermes Gateway** (`127.0.0.1:8642`). For media it talks to the local **media bridge** (`8643`), and for browser use it drives the **browser-use hub** (`8645`).
 
 ### Drive your real browser (MCP)
 
@@ -112,7 +112,7 @@ sidepanel.js        client: SSE parser, rendering pipeline, polling, paste (+ br
 renderer.js         pure markdown/media/math extraction (node-testable)
 test_renderer.js    unit tests — run: node test_renderer.js
 test_browser_mcp.py browser-mcp unit tests — run: py -3.14 -B test_browser_mcp.py
-browser-mcp.py      browser-use hub: MCP stdio server + WS listener on 8644 (B1–B4 tools)
+browser-mcp.py      browser-use hub: MCP stdio server + WS listener on 8645 (B1–B4 tools)
 media-bridge.py     optional local media server (127.0.0.1:8643, stdlib-only)
 media-bridge.bat    launcher for media-bridge.py
 PROTOCOL.md         live-browser bridge wire protocol (B1–B4)
@@ -208,7 +208,7 @@ How it fits together:
 
 | Piece | Role |
 |---|---|
-| `browser-mcp.py` | MCP server (stdio, for Hermes) + WebSocket hub on `ws://127.0.0.1:8644` |
+| `browser-mcp.py` | MCP server (stdio, for Hermes) + WebSocket hub on `ws://127.0.0.1:8645` |
 | `background.js` | extension SW: WS client, pairing token, `chrome.debugger` attach/relay |
 | sidepanel | status chip + **agent-session card** (driving / idle / auto-release countdown), Disconnect kill switch, Advanced (manual tab attach, reset pairing) |
 
@@ -222,8 +222,8 @@ py -3.14 -m pip install --user fastmcp websockets
   itself** — no console window needed. `browser-mcp.bat` (clears `PYTHONPATH`,
   which this machine's env points at the Hermes venv whose 3.11-built
   `pydantic_core` breaks Python 3.14 imports, and runs `py -3.14 -u
-  browser-mcp.py`) is only for standalone testing without Hermes — never run
-  both at once (one hub on port 8644). Loopback only either way.
+   browser-mcp.py`) is only for standalone testing without Hermes — never run
+   both at once (one hub on port 8645). Loopback only either way.
 - **Pairing is TOFU, one slot per browser**: the first extension `hello` from
   each browser (Chrome / Edge / Chromium) pins that browser's token to
   `.live-browser-token` (JSON map; legacy single-token files migrate to a `*`
@@ -291,7 +291,7 @@ afterwards (same rule as `media-bridge.py`).
 | Empty replies | Check Hermes logs; model backend may be down |
 | Local images render as path links — `local file — start media-bridge.bat…` (e.g. `%APPDATA%\Hermes\composer-images\...png`) | Bridge not running. `media-bridge.py` is required for local files (`%APPDATA%\Hermes`, `~`, `/tmp`, `C:\projects` only). Run `media-bridge.bat` and keep window open, then reload panel. Verify: `curl http://127.0.0.1:8643/media?path=C:\Users\...\image.png` should return 200. `file://` fallback is blocked in MV3 (Edge always, Chrome without toggle). |
 | Local image 403 `path outside allowed roots` | File outside allowlist roots — move under `%APPDATA%\Hermes` or home dir |
-| Chip stuck red / tools return `TIMEOUT` even though the hub should be up | A shadow listener can hold the port while `browser-mcp.py` is down (e.g. the Hermes gateway binds `0.0.0.0:8644`; the extension then "connects" to the wrong peer). The extension now treats a connection as usable only after the hub's `hello-ack` — a missing ack means close + backoff, so the bridge recovers when the real hub returns. Verify with `netstat -ano \| findstr :8644` and restart `browser-mcp.bat` |
+| Chip stuck red / tools return `TIMEOUT` even though the hub should be up | A shadow listener can hold the port while `browser-mcp.py` is down (e.g. the Hermes gateway binds `0.0.0.0:8644`; the extension then "connects" to the wrong peer). The extension now treats a connection as usable only after the hub's `hello-ack` — a missing ack means close + backoff, so the bridge recovers when the real hub returns. Verify with `netstat -ano \| findstr :8645` and restart `browser-mcp.bat` |
 | Extension stuck in a 4401 pairing loop (lockout) | Sidepanel → Browser → **Reset pairing** — wipes the stored token and re-pins this browser's slot with a fresh one (`rotate:true` hello) |
 
 Probe from a terminal (replace `KEY`):

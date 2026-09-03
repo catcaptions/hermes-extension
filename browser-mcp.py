@@ -4,7 +4,7 @@ browser-mcp.py — Hermes browser-use layer: B1 transport + B2–B4 tools.
 
 MCP server (stdio, FastMCP, server name "live_browser") that doubles as a
 loopback WebSocket hub for the Hermes extension (background.js). The
-extension connects OUT to ws://127.0.0.1:8644, pairs with a token, and
+extension connects OUT to ws://127.0.0.1:8645, pairs with a token, and
 relays chrome.debugger CDP traffic for the user's real tabs. The tool
 surface (mcp_live_browser_*) drives the USER'S LIVE BROWSER — existing
 tabs, cookies, logins — never a headless instance.
@@ -63,7 +63,7 @@ except ImportError as err:
 serve = websockets.serve  # asyncio server entry (top-level in 15+ and 17+)
 
 
-HOST, PORT = '127.0.0.1', 8644  # loopback ONLY — bound, not just checked
+HOST, PORT = '127.0.0.1', 8645  # loopback ONLY — bound, not just checked
 HEARTBEAT_INTERVAL = 15.0       # server pings every 15 s...
 PONG_TIMEOUT = 10.0             # ...and marks the bridge down if no pong
 STATUS_TIMEOUT = 5.0            # status round-trip budget (MCP tool)

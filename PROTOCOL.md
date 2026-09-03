@@ -7,7 +7,7 @@ semantics on top — the envelope stays.
 
 ## Endpoint & trust model
 
-- `ws://127.0.0.1:8644` — the hub **binds loopback only** and rejects
+- `ws://127.0.0.1:8645` — the hub **binds loopback only** and rejects
   non-loopback peers at connect time. No HTTP surface; the extension always
   connects **out** to the hub.
 - **Pairing token:** TOFU (trust-on-first-use), one slot **per browser** — the

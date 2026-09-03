@@ -108,6 +108,7 @@ let pollTimer = null;
 let pollInFlight = false;
 let lastSeenCount = null;    // message_count from the last session-list poll
 let lastFingerprint = null;  // fingerprint of the last rendered message list
+let lastPollFetchAt = 0;     // last time we actually fetched messages (for count-drift fallback)
 let quietUntil = 0;          // poll adoption grace after a local stream ends
 let streamEndedAt = 0;       // used for the stale-limit guard
 let sessionMissing = false;  // active session 404'd server-side
@@ -269,7 +270,8 @@ async function getMessages(sessionId) {
   const res = await hermesFetch(`/api/sessions/${encodeURIComponent(sessionId)}/messages`);
   const payload = await readJson(res);
   if (!res.ok) throw new Error(errorMessage(payload, `Load messages failed (${res.status})`));
-  return rows(payload).map(normalizeMessage).filter(Boolean);
+  const normalized = rows(payload).map(normalizeMessage).filter(Boolean);
+  return mergeConsecutiveActivity(normalized);
 }
 
 function pickFirst(obj, keys) {
@@ -334,12 +336,21 @@ function coerceTools(row) {
     const inputRaw = t.input ?? t.args ?? t.arguments ?? t.params ?? '';
     const isTerminal = lcName === 'terminal' || String(t.tool || '').toLowerCase().includes('terminal');
     const cmd = isTerminal ? extractCommandFromTool(t) : '';
-    const labelSrc = isTerminal ? (cmd || toDisplayString(inputRaw, 500)) : String(t.label ?? t.title ?? t.summary ?? t.description ?? '').trim();
-    const label = (labelSrc || (isTerminal ? summarizeCommand(cmd) : '') || toDisplayString(inputRaw, 300)).trim().slice(0, 500) || (isTerminal && cmd ? summarizeCommand(cmd) : '');
+    let labelSrc = isTerminal ? (cmd || toDisplayString(inputRaw, 500)) : String(t.label ?? t.title ?? t.summary ?? t.description ?? '').trim();
+    if (isEmptyDisplay(labelSrc)) labelSrc = '';
+    let rawLabel = (labelSrc || (isTerminal ? summarizeCommand(cmd) : '') || toDisplayString(inputRaw, 300)).trim().slice(0, 500);
+    if (isEmptyDisplay(rawLabel)) rawLabel = '';
+    if ((lcName === 'tool_call' || lcName === 'tool' || lcName === 'function') && rawLabel.toLowerCase() === lcName) rawLabel = '';
+    // Generic `message` / `tool_call` noise seen as `message {}` / `tool_call tool_call` in the wild.
+    if ((lcName === 'message' || lcName === 'tool_call' || lcName === 'tool' || lcName === 'function') && !rawLabel && !hasOutput && isEmptyDisplay(toDisplayString(inputRaw, 300))) return null;
+    // Snapshot/check with empty args — show no subtitle instead of "{}"
+    if (isEmptyDisplay(rawLabel) && isEmptyDisplay(toDisplayString(inputRaw, 20))) rawLabel = '';
+    const label = rawLabel || (isTerminal && cmd ? summarizeCommand(cmd) : '');
     const displayName = isTerminal ? 'terminal' : name;
     const displayLabel = isTerminal ? (cmd ? summarizeCommand(cmd) : label) : label;
     if (isTerminal && !cmd && !displayLabel) return null;
-    return { name: displayName, label: displayLabel, status: ['running', 'done', 'error'].includes(status) ? status : 'running', input: (isTerminal && cmd ? cmd : toDisplayString(inputRaw, 800)), output: outputStr };
+    const inputStr = toDisplayString(inputRaw, 800);
+    return { name: displayName, label: displayLabel, status: ['running', 'done', 'error'].includes(status) ? status : 'running', input: isEmptyDisplay(inputStr) ? '' : (isTerminal && cmd ? cmd : inputStr), output: outputStr };
   }).filter(Boolean).slice(0, 20);
 }
 
@@ -374,6 +385,37 @@ function coerceSkills(row) {
   }).filter((s) => s && s.name).slice(0, 10);
 }
 
+function mergeConsecutiveActivity(msgs) {
+  const out = [];
+  for (const m of msgs) {
+    const isActOnly = m.role === 'assistant' && !String(m.content || '').trim() && Boolean(m.thought || (m.tools && m.tools.length) || (m.diffs && m.diffs.length) || (m.skills && m.skills.length));
+    const prev = out[out.length - 1];
+    const prevIsActOnly = prev && prev.role === 'assistant' && !String(prev.content || '').trim() && Boolean(prev.thought || (prev.tools && prev.tools.length) || (prev.diffs && prev.diffs.length) || (prev.skills && prev.skills.length));
+    if (isActOnly && prevIsActOnly) {
+      if (m.thought) prev.thought = [prev.thought, m.thought].filter(Boolean).join('\n\n').slice(0, 8000);
+      if (m.tools && m.tools.length) prev.tools = [...(prev.tools || []), ...m.tools].slice(0, 24);
+      if (m.diffs && m.diffs.length) prev.diffs = [...(prev.diffs || []), ...m.diffs].slice(0, 10);
+      if (m.skills && m.skills.length) {
+        const seen = new Set((prev.skills || []).map((s) => s.name));
+        for (const s of m.skills) if (!seen.has(s.name)) { prev.skills.push(s); seen.add(s.name); }
+      }
+      continue;
+    }
+    // Drop truly empty assistant placeholders that survived (no content, no meaningful activity)
+    if (m.role === 'assistant' && !String(m.content || '').trim()) {
+      const hasMeaningful = Boolean(
+        (m.thought && String(m.thought).trim()) ||
+        (m.tools && m.tools.some((t) => !isEmptyDisplay(t.label) || !isEmptyDisplay(t.input) || !isEmptyDisplay(t.output))) ||
+        (m.diffs && m.diffs.length) ||
+        (m.skills && m.skills.length)
+      );
+      if (!hasMeaningful) continue;
+    }
+    out.push(m);
+  }
+  return out;
+}
+
 function normalizeMessage(row) {
   if (!row || typeof row !== 'object') return null;
   const role = String(row.role || row.sender || '').toLowerCase();
@@ -392,7 +434,7 @@ function normalizeMessage(row) {
   const skills = coerceSkills(row);
   const hasActivity = Boolean(thought || tools.length || diffs.length || skills.length);
   if (!content && role !== 'assistant' && !hasActivity) return null;
-  if (!content && role === 'assistant' && !hasActivity) return { role: 'assistant', content: '' };
+  if (!content && role === 'assistant' && !hasActivity) return null;
   const msg = { role: role === 'system' ? 'assistant' : role, content };
   if (thought) msg.thought = thought;
   if (tools.length) msg.tools = tools;
@@ -479,6 +521,11 @@ function toDisplayString(v, cap = 800) {
   try { return JSON.stringify(v).slice(0, cap); } catch { return String(v).slice(0, cap); }
 }
 
+function isEmptyDisplay(s) {
+  const t = String(s || '').trim();
+  return t === '' || t === '{}' || t === '[]' || t === '""' || t === "''" || t === 'null' || t === 'undefined';
+}
+
 function extractToolName(raw, fallback) {
   const cand = raw.name ?? raw.tool ?? raw.function ?? raw.tool_name ?? raw.id;
   if (typeof cand === 'string' && cand.trim()) return cand.trim().slice(0, 80);
@@ -494,8 +541,25 @@ function ingestActivityEvent(msg, type, data) {
   if (!t || ['assistant.delta', 'assistant.completed', 'run.completed', 'run.started', 'message.started', 'message.completed', 'message.delta'].includes(t)) return false;
   if (t.startsWith('message.')) return false;
   if (t === 'error') return false;
-  const activity = ensureActivity(msg);
   const raw = data && typeof data === 'object' ? data : {};
+  // Plain `message` events: if empty they are noise (seen as `message {}`); if they carry
+  // real text they should surface as activity rather than an unknown row.
+  if (t === 'message') {
+    const hasContent = Boolean(String(raw.content ?? raw.text ?? raw.message ?? raw.delta ?? '').trim());
+    const rawEmpty = isEmptyDisplay(JSON.stringify(raw)) || Object.keys(raw).length === 0;
+    if (!hasContent && rawEmpty) return true; // swallow empty message noise
+    if (hasContent) {
+      const activityM = ensureActivity(msg);
+      const text = toDisplayString(raw.content ?? raw.text ?? raw.message ?? raw.delta, 4000).trim();
+      if (text && !isEmptyDisplay(text)) {
+        pushTool(activityM, { id: raw.id ? String(raw.id) : '', name: 'message', label: text.slice(0, 300), type: t, status: 'done', input: text.slice(0, 800), output: '' });
+      }
+      return true;
+    }
+    // empty but not strictly `{}` — still swallow to avoid `message {}` spam
+    if (rawEmpty) return true;
+  }
+  const activity = ensureActivity(msg);
   const rawToolName = String(extractToolName(raw, '') || raw.tool || raw.name || '').toLowerCase();
   const isThinkingTool = rawToolName === '_thinking' || rawToolName === 'thinking' || rawToolName === 'reasoning';
   if (t.includes('thought') || t.includes('reasoning') || t.includes('thinking') || isThinkingTool) {
@@ -571,7 +635,8 @@ function ingestActivityEvent(msg, type, data) {
     const label = isTerminal ? shortCmd : (cmd.length > 80 ? `Run: ${cmd.slice(0, 77)}…` : `Run: ${cmd}`);
     const name = isTerminal ? 'terminal' : label;
     const cmdLabel = isTerminal ? shortCmd : cmd;
-    pushTool(activity, { id: raw.id ? String(raw.id) : '', name, label: cmdLabel, type: t, status: raw.error ? 'error' : 'done', input: cmd.slice(0, 800), output });
+    const termStatus = raw.error ? 'error' : /(BRIDGE_DOWN|TIMEOUT|ATTACH_FAILED|TAB_BUSY)/i.test(output) ? 'error' : 'done';
+    pushTool(activity, { id: raw.id ? String(raw.id) : '', name, label: cmdLabel, type: t, status: termStatus, input: cmd.slice(0, 800), output });
     return true;
   }
   if (isThinkingTool) return true;
@@ -579,9 +644,27 @@ function ingestActivityEvent(msg, type, data) {
     if (isThinkingTool) return true;
     const name = extractToolName(raw, t);
     if (name.toLowerCase() === '_thinking' || name.toLowerCase() === 'thinking') return true;
+    // Exact `message` type already handled above — don't double-process as generic tool
+    if (name.toLowerCase() === 'message') return true;
+    // Swallow generic `tool_call`/`tool` with no meaningful payload (the `tool_call tool_call` spam)
+    {
+      const _lc = name.toLowerCase();
+      if (_lc === 'tool_call' || _lc === 'tool' || _lc === 'function') {
+        const _rawLab = String(raw.label ?? raw.title ?? raw.summary ?? raw.description ?? nestedCmd ?? '').trim();
+        const _labNorm = _rawLab.toLowerCase();
+        const _hasLabel = Boolean(_rawLab) && !isEmptyDisplay(_rawLab) && _labNorm !== _lc && _labNorm !== 'tool_call';
+        const _hasIn = !isEmptyDisplay(toDisplayString(raw.input ?? raw.args ?? raw.arguments ?? raw.params ?? '', 20));
+        const _hasOut = !isEmptyDisplay(toDisplayString(raw.output ?? raw.result ?? raw.content ?? '', 20));
+        if (!_hasLabel && !_hasIn && !_hasOut) return true;
+      }
+    }
     const labelRaw = raw.label ?? raw.title ?? raw.summary ?? raw.description ?? raw.detail ?? nestedCmd ?? '';
-    const label = toDisplayString(labelRaw, 500).trim();
-    const status = String(raw.status || (raw.error ? 'error' : raw.output || raw.result ? 'done' : t.includes('progress') ? 'running' : 'running')).toLowerCase();
+    let label = toDisplayString(labelRaw, 500).trim();
+    if (isEmptyDisplay(label)) label = '';
+    let status = String(raw.status || (raw.error ? 'error' : raw.output || raw.result ? 'done' : t.includes('progress') ? 'running' : 'running')).toLowerCase();
+    // Surface bridge/tab failures as error (even when gateway reports them as done output)
+    const _maybeOut = toDisplayString(raw.output ?? raw.result ?? raw.content ?? raw.observation ?? '', 600);
+    if (status !== 'error' && /(BRIDGE_DOWN|TIMEOUT|TAB_NOT_ATTACHED|TAB_BUSY|ATTACH_FAILED|TAB_NOT_FOUND|BRIDGE_UNREACHABLE)/i.test(_maybeOut)) status = 'error';
     const entry = {
       id: raw.id ? String(raw.id) : '',
       name,
@@ -592,10 +675,13 @@ function ingestActivityEvent(msg, type, data) {
       output: raw.output ?? raw.result ?? raw.content ?? raw.observation ?? '',
     };
     entry.input = toDisplayString(entry.input, 800);
+    if (isEmptyDisplay(entry.input)) entry.input = '';
     entry.output = toDisplayString(entry.output, 4000);
-    if (!entry.label && entry.input) entry.label = entry.input.slice(0, 300);
-    if (!entry.label && nestedCmd) entry.label = nestedCmd.slice(0, 300);
-    if (!entry.label) entry.label = summarizeCommand(nestedCmd || entry.input || '');
+    if (isEmptyDisplay(entry.output)) entry.output = '';
+    if (!entry.label && entry.input && !isEmptyDisplay(entry.input)) entry.label = entry.input.slice(0, 300);
+    if (isEmptyDisplay(entry.label) && nestedCmd && !isEmptyDisplay(nestedCmd)) entry.label = nestedCmd.slice(0, 300);
+    if (isEmptyDisplay(entry.label)) entry.label = summarizeCommand(nestedCmd || entry.input || '');
+    if (isEmptyDisplay(entry.label)) entry.label = '';
     pushTool(activity, entry);
     const patch2 = raw.patch ?? raw.diff;
     if (typeof patch2 === 'string' && patch2.trim()) {
@@ -606,10 +692,15 @@ function ingestActivityEvent(msg, type, data) {
   }
   try {
     const preview = JSON.stringify(raw).slice(0, 600);
+    if (isEmptyDisplay(preview)) return true; // swallow empty unknown noise like `{}`
+    // Collapse noisy MCP snapshot noise: empty args are not unknown
+    if (t.startsWith('mcp_live_browser') && isEmptyDisplay(preview)) return true;
     activity.unknown.push({ type: String(type), preview });
     if (activity.unknown.length > 12) activity.unknown.shift();
   } catch {
-    activity.unknown.push({ type: String(type), preview: toDisplayString(raw, 600) });
+    const alt = toDisplayString(raw, 600);
+    if (isEmptyDisplay(alt)) return true;
+    activity.unknown.push({ type: String(type), preview: alt });
   }
   return true;
 }
@@ -1220,14 +1311,20 @@ function renderActivityBlocks(msg) {
     for (const s of activity.skills) actionItems.push({ kind: 'skill', title: String(s.name || s).slice(0, 60) });
   }
   if (hasUnknown) {
-    for (const u of activity.unknown.slice(-6)) actionItems.push({ kind: 'unknown', title: String(u.type).slice(0, 80), label: String(u.preview || '').trim().slice(0, 400) });
+    for (const u of activity.unknown.slice(-6)) {
+      const lab = String(u.preview || '').trim().slice(0, 400);
+      if (isEmptyDisplay(lab)) continue;
+      if (String(u.type || '').toLowerCase() === 'message' && isEmptyDisplay(lab)) continue;
+      actionItems.push({ kind: 'unknown', title: String(u.type).slice(0, 80), label: lab });
+    }
   }
   if (!actionItems.length) { host.innerHTML = ''; host.style.display = 'none'; return; }
   const preview = actionItems.slice(0, 2).map((it) => {
     if (it.kind === 'thought') return `Thought › ${it.label.slice(0, 60)}`;
-    if (it.kind === 'tool') return `${it.title} — ${it.label.slice(0, 50)}`;
+    if (it.kind === 'tool') return it.label ? `${it.title} — ${it.label.slice(0, 50)}` : it.title;
     if (it.kind === 'diff') return `Diff: ${it.title}`;
     if (it.kind === 'skill') return `Skill: ${it.title}`;
+    if (it.kind === 'unknown') return it.label ? `${it.title} ${it.label.slice(0, 40)}` : it.title;
     return it.title;
   }).join(' · ').slice(0, 120);
   const count = actionItems.length;
@@ -2488,9 +2585,14 @@ async function pollActiveSession() {
       changed = true; // list failed → try messages directly
     }
     if (activeSessionId !== sid || sending) return;
-    if (!changed) return;
+    // Fallback for gateway message_count drift: if count is stalled but
+    // another client wrote via chat/stream, count may not bump — force a
+    // full fetch every 15s so Extension→Desktop doesn't stay stale.
+    if (!changed && Date.now() - lastPollFetchAt < 15000) return;
+    if (!changed) changed = true; // time-based fallback triggered
 
     // Stage 2: full history + fingerprint reconciliation (text + activity).
+    lastPollFetchAt = Date.now();
     const serverMsgs = await getMessages(sid);
     if (activeSessionId !== sid || sending) return; // adoption-time guards
     const afp = (typeof renderer !== 'undefined' && renderer.activityFingerprint)
@@ -2498,7 +2600,10 @@ async function pollActiveSession() {
       : '';
     const fp = `${renderer.fingerprint(serverMsgs)}\u0000${afp}`;
     if (fp === lastFingerprint) return;
-    if (Date.now() < quietUntil) return; // post-stream grace
+    // Post-stream grace protects a just-streamed message that hasn't persisted
+    // yet from blinking out. But if the server is AHEAD (new messages from
+    // another client), adopt immediately — don't wait out the grace.
+    if (Date.now() < quietUntil && serverMsgs.length <= messages.length) return;
     if (serverMsgs.length < messages.length && Date.now() - streamEndedAt < POLL_STALE_LIMIT_MS) {
       return; // server is behind (or a stopped stream never persisted): keep local
     }
@@ -2543,6 +2648,7 @@ function syncPollState() {
       }).join('\u0001')
     : '';
   lastFingerprint = `${renderer.fingerprint(messages)}\u0000${afp}`;
+  lastPollFetchAt = Date.now();
   streamEndedAt = Date.now();
   quietUntil = streamEndedAt + POLL_QUIET_MS;
   sessionMissing = false;
@@ -2579,6 +2685,7 @@ async function beginNewChat() {
   messages = [];
   lastSeenCount = null;
   lastFingerprint = null;
+  lastPollFetchAt = 0;
   quietUntil = 0;
   streamEndedAt = 0;
   sessionMissing = false;
@@ -2631,6 +2738,7 @@ async function selectSession(id, title) {
     messages = await getMessages(id);
     syncPollState();
     lastSeenCount = null;
+    lastPollFetchAt = Date.now();
     quietUntil = 0; // just synced from the server; no local stream to protect
     streamEndedAt = 0;
     renderMessages();

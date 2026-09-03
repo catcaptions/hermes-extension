@@ -1,15 +1,16 @@
 // Hermes Extension — MV3 service worker.
 // 1) sidePanel behavior (toolbar click opens the panel).
 // 2) Browser-use layer B1 (TASK_BRIEF_B1): WebSocket client for the local
-//    browser-mcp.py hub (ws://127.0.0.1:8644) + chrome.debugger relay.
+//    browser-mcp.py hub (ws://127.0.0.1:8645) + chrome.debugger relay.
 //    The extension connects OUT to the hub, pairs with a token, and tunnels
 //    CDP commands to the USER'S real tabs. Protocol: see PROTOCOL.md.
 
-const WS_URL = 'ws://127.0.0.1:8644';
+const WS_URL = 'ws://127.0.0.1:8645';
 const RECONNECT_BACKOFF = [1000, 2000, 4000, 8000, 16000]; // ms, then capped
 const KEEPALIVE_ALARM = 'hermes-browser-keepalive';
+const RECONNECT_ALARM = 'hermes-ws-reconnect';
 const TAB_BUSY_MSG = 'TAB_BUSY';
-// A gateway (or anything else) can shadow ws://127.0.0.1:8644 while
+// A gateway (or anything else) can shadow ws://127.0.0.1:8645 while
 // browser-mcp.py is down — only a hello-ack from the hub proves the peer.
 const ACK_TIMEOUT_MS = 5000;
 
@@ -77,6 +78,8 @@ function scheduleReconnect() {
   const delay = RECONNECT_BACKOFF[Math.min(wsRetry, RECONNECT_BACKOFF.length - 1)];
   wsRetry++;
   wsTimer = setTimeout(connectWs, delay);
+  // setTimeout is lost when the SW sleeps — alarm survives restarts
+  chrome.alarms.create(RECONNECT_ALARM, { when: Date.now() + delay }).catch(() => {});
 }
 
 function connectWs() {
@@ -101,6 +104,7 @@ function connectWs() {
 
 async function onWsOpen() {
   wsRetry = 0;
+  await chrome.alarms.clear(RECONNECT_ALARM).catch(() => {});
   const { liveBrowserToken, rotatePairing } = await chrome.storage.local.get([
     'liveBrowserToken', 'rotatePairing',
   ]);
@@ -134,7 +138,7 @@ function onWsClose() {
   clearTimeout(ackTimer);
   ws = null;
   broadcastBrowserState();
-  scheduleReconnect();
+  if (wsEnabled) scheduleReconnect();
 }
 
 async function onWsMessage(e) {
@@ -472,12 +476,28 @@ async function updateKeepAlive() {
   if (tabId != null) {
     await chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: KEEPALIVE_PERIOD_MIN });
   } else {
-    await chrome.alarms.clear(KEEPALIVE_ALARM);
+    // Keep keepalive armed even when no tab attached — it piggybacks WS
+    // reconnect (SW would otherwise sleep forever with setTimeout lost).
+    await chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: KEEPALIVE_PERIOD_MIN });
   }
 }
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === RECONNECT_ALARM) {
+    if (!wsEnabled) {
+      await chrome.alarms.clear(RECONNECT_ALARM).catch(() => {});
+      return;
+    }
+    if (paired && ws && ws.readyState === WebSocket.OPEN) {
+      await chrome.alarms.clear(RECONNECT_ALARM).catch(() => {});
+      return;
+    }
+    connectWs();
+    return;
+  }
   if (alarm.name !== KEEPALIVE_ALARM) return;
+  // Keepalive also piggybacks reconnect when WS is down but SW stayed alive
+  if (!paired && wsEnabled) connectWs();
   if (Date.now() - lastHubActivity >= IDLE_DETACH_MS) {
     const tabId = await getAttachedTabId();
     if (tabId == null) return;
@@ -538,6 +558,7 @@ async function disconnectAll() {
   // auto-reconnect until the user reconnects from the sidepanel.
   wsEnabled = false;
   clearTimeout(wsTimer);
+  await chrome.alarms.clear(RECONNECT_ALARM).catch(() => {});
   try { ws?.close(); } catch {}
   ws = null;
   try {
@@ -576,7 +597,7 @@ async function boot() {
     .setPanelBehavior({ openPanelOnActionClick: true })
     .catch(() => {});
   connectWs();
-  await updateKeepAlive(); // re-arm after an SW restart with a tab attached
+  await updateKeepAlive(); // re-arm after an SW restart (also keeps reconnect alive when idle)
   if ((await getAttachedTabId()) != null) broadcastBrowserState();
 }
 
