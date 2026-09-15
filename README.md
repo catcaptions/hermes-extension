@@ -303,4 +303,4 @@ curl -s -H "Authorization: Bearer KEY" http://127.0.0.1:8642/api/sessions?limit=
 
 ## License
 
-MIT — see the project homepage for details.
+MIT — see [LICENSE](LICENSE).
